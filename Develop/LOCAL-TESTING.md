@@ -390,6 +390,36 @@ Wrangler 支持手动触发 cron 任务：
 curl "http://localhost:8787/__scheduled?cron=*+*+*+*+*"
 ```
 
+### Scheduler CPU 压测
+
+对 `runScheduledTick` 做本地 synthetic benchmark：
+
+```bash
+pnpm --filter @uptimer/worker bench:scheduler
+```
+
+默认会把当前工作树与 `HEAD` 对比，适合做未提交调优的前后复测。
+
+如果要和特定基线比（例如 `origin/master` 或某个 commit），可覆盖基线 ref：
+
+```bash
+SCHEDULER_BENCH_BASE_REF=origin/master pnpm --filter @uptimer/worker bench:scheduler
+SCHEDULER_BENCH_BASE_REF=ee9207b pnpm --filter @uptimer/worker bench:scheduler
+```
+
+可选参数：
+
+```bash
+SCHEDULER_BENCH_RUNS=20 SCHEDULER_BENCH_WARMUPS=5 pnpm --filter @uptimer/worker bench:scheduler
+SCHEDULER_BENCH_WRITE_JSON=./scheduler-bench.json pnpm --filter @uptimer/worker bench:scheduler
+```
+
+说明：
+
+- 基准只测 scheduler 自身的调度、状态计算和 D1 编排开销。
+- HTTP/TCP probe 会被 mock 掉，避免真实网络波动污染结果。
+- 输出里的 `DB.batch()` 次数可直接反映批量写入是否生效。
+
 ---
 
 ## Phase 8/9: 事件与维护窗口验证步骤（最小示例）

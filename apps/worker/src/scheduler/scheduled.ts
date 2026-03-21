@@ -11,7 +11,12 @@ import {
 
 import type { Env } from '../env';
 import { runHttpCheck } from '../monitor/http';
-import { computeNextState, type MonitorStateSnapshot } from '../monitor/state-machine';
+import {
+  computeNextState,
+  type MonitorStateSnapshot,
+  type NextState,
+  type OutageAction,
+} from '../monitor/state-machine';
 import { runTcpCheck } from '../monitor/tcp';
 import type { CheckOutcome } from '../monitor/types';
 import { dispatchWebhookToChannels, type WebhookChannel } from '../notify/webhook';
@@ -22,6 +27,7 @@ const LOCK_NAME = 'scheduler:tick';
 const LOCK_LEASE_SECONDS = 55;
 
 const CHECK_CONCURRENCY = 5;
+const PERSIST_BATCH_SIZE = 25;
 
 // Look back a bit so maintenance start/end notifications are not missed if a tick is delayed.
 const MAINTENANCE_EVENT_LOOKBACK_SECONDS = 10 * 60;
@@ -59,6 +65,17 @@ type NotifyContext = {
   ctx: ExecutionContext;
   envRecord: Record<string, unknown>;
   channels: WebhookChannelWithMeta[];
+};
+
+type CompletedDueMonitor = {
+  row: DueMonitorRow;
+  checkedAt: number;
+  prevStatus: MonitorStatus | null;
+  outcome: CheckOutcome;
+  next: NextState;
+  outageAction: OutageAction;
+  stateLastError: string | null;
+  maintenanceSuppressed: boolean;
 };
 
 async function listActiveWebhookChannels(db: D1Database): Promise<WebhookChannelWithMeta[]> {
@@ -285,26 +302,21 @@ function computeStateLastError(
   return outcome.status === 'up' ? null : outcome.error;
 }
 
-async function persistCheckAndState(
-  env: Env,
-  monitorId: number,
-  checkedAt: number,
-  outcome: CheckOutcome,
-  next: {
-    status: MonitorStatus;
-    lastChangedAt: number;
-    consecutiveFailures: number;
-    consecutiveSuccesses: number;
-  },
-  outageAction: 'open' | 'close' | 'update' | 'none',
-  stateLastError: string | null,
-): Promise<void> {
+function buildPersistStatements(completed: CompletedDueMonitor, db: D1Database): D1PreparedStatement[] {
+  const {
+    row,
+    checkedAt,
+    outcome,
+    next,
+    outageAction,
+    stateLastError,
+  } = completed;
   const checkError = outcome.status === 'up' ? null : outcome.error;
 
   const statements: D1PreparedStatement[] = [];
 
   statements.push(
-    env.DB.prepare(
+    db.prepare(
       `
       INSERT INTO check_results (
         monitor_id,
@@ -318,7 +330,7 @@ async function persistCheckAndState(
       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
     `,
     ).bind(
-      monitorId,
+      row.id,
       checkedAt,
       outcome.status,
       outcome.latencyMs,
@@ -330,7 +342,7 @@ async function persistCheckAndState(
   );
 
   statements.push(
-    env.DB.prepare(
+    db.prepare(
       `
       INSERT INTO monitor_state (
         monitor_id,
@@ -352,7 +364,7 @@ async function persistCheckAndState(
         consecutive_successes = excluded.consecutive_successes
     `,
     ).bind(
-      monitorId,
+      row.id,
       next.status,
       checkedAt,
       next.lastChangedAt,
@@ -365,7 +377,7 @@ async function persistCheckAndState(
 
   if (outageAction === 'open') {
     statements.push(
-      env.DB.prepare(
+      db.prepare(
         `
         INSERT INTO outages (monitor_id, started_at, ended_at, initial_error, last_error)
         SELECT ?1, ?2, NULL, ?3, ?4
@@ -373,41 +385,39 @@ async function persistCheckAndState(
           SELECT 1 FROM outages WHERE monitor_id = ?5 AND ended_at IS NULL
         )
       `,
-      ).bind(monitorId, checkedAt, checkError ?? 'down', checkError ?? 'down', monitorId),
+      ).bind(row.id, checkedAt, checkError ?? 'down', checkError ?? 'down', row.id),
     );
   } else if (outageAction === 'close') {
     statements.push(
-      env.DB.prepare(
+      db.prepare(
         `
         UPDATE outages
         SET ended_at = ?1
         WHERE monitor_id = ?2 AND ended_at IS NULL
       `,
-      ).bind(checkedAt, monitorId),
+      ).bind(checkedAt, row.id),
     );
   } else if (outageAction === 'update' && checkError) {
     statements.push(
-      env.DB.prepare(
+      db.prepare(
         `
         UPDATE outages
         SET last_error = ?1
         WHERE monitor_id = ?2 AND ended_at IS NULL
       `,
-      ).bind(checkError, monitorId),
+      ).bind(checkError, row.id),
     );
   }
 
-  await env.DB.batch(statements);
+  return statements;
 }
 
 async function runDueMonitor(
-  env: Env,
   row: DueMonitorRow,
   checkedAt: number,
-  notify: NotifyContext | null,
   maintenanceSuppressed: boolean,
   stateMachineConfig: { failuresToDownFromUp: number; successesToUpFromDown: number },
-): Promise<void> {
+): Promise<CompletedDueMonitor> {
   const prevStatus = toMonitorStatus(row.state_status);
   const prev: MonitorStateSnapshot | null =
     prevStatus === null
@@ -479,24 +489,46 @@ async function runDueMonitor(
   const { next, outageAction } = computeNextState(prev, outcome, checkedAt, stateMachineConfig);
   const stateLastError = computeStateLastError(next.status, outcome, row.state_last_error);
 
-  await persistCheckAndState(
-    env,
-    row.id,
+  return {
+    row,
     checkedAt,
+    prevStatus,
     outcome,
-    {
-      status: next.status,
-      lastChangedAt: next.lastChangedAt,
-      consecutiveFailures: next.consecutiveFailures,
-      consecutiveSuccesses: next.consecutiveSuccesses,
-    },
+    next,
     outageAction,
     stateLastError,
-  );
+    maintenanceSuppressed,
+  };
+}
 
-  if (!notify || maintenanceSuppressed || !next.changed) {
+async function persistCompletedMonitors(
+  db: D1Database,
+  completed: CompletedDueMonitor[],
+): Promise<void> {
+  for (let i = 0; i < completed.length; i += PERSIST_BATCH_SIZE) {
+    const chunk = completed.slice(i, i + PERSIST_BATCH_SIZE);
+    const statements: D1PreparedStatement[] = [];
+
+    for (const monitor of chunk) {
+      statements.push(...buildPersistStatements(monitor, db));
+    }
+
+    if (statements.length > 0) {
+      await db.batch(statements);
+    }
+  }
+}
+
+function queueMonitorNotification(
+  env: Env,
+  notify: NotifyContext | null,
+  completed: CompletedDueMonitor,
+): void {
+  if (!notify || completed.maintenanceSuppressed || !completed.next.changed) {
     return;
   }
+
+  const { row, checkedAt, prevStatus, outcome, next } = completed;
 
   const prevForEvent: MonitorStatus = prevStatus ?? 'unknown';
   let eventType: 'monitor.down' | 'monitor.up' | null = null;
@@ -648,21 +680,18 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
 
   // Maintenance suppression is monitor-scoped.
   const dueMonitorIds = due.map((m) => m.id);
-  const suppressedMonitorIds = await listMaintenanceSuppressedMonitorIds(
-    env.DB,
-    now,
-    dueMonitorIds,
-  );
+  const suppressedMonitorIds =
+    notify === null
+      ? new Set<number>()
+      : await listMaintenanceSuppressedMonitorIds(env.DB, now, dueMonitorIds);
 
   const limit = pLimit(CHECK_CONCURRENCY);
   const settled = await Promise.allSettled(
     due.map((m) =>
       limit(() =>
         runDueMonitor(
-          env,
           m,
           checkedAt,
-          notify,
           suppressedMonitorIds.has(m.id),
           stateMachineConfig,
         ),
@@ -671,6 +700,18 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
   );
 
   const rejected = settled.filter((r) => r.status === 'rejected');
+  const completed = settled
+    .filter((r): r is PromiseFulfilledResult<CompletedDueMonitor> => r.status === 'fulfilled')
+    .map((r) => r.value);
+
+  if (completed.length > 0) {
+    await persistCompletedMonitors(env.DB, completed);
+
+    for (const monitor of completed) {
+      queueMonitorNotification(env, notify, monitor);
+    }
+  }
+
   if (rejected.length > 0) {
     console.error(`scheduled: ${rejected.length}/${settled.length} monitors failed`, rejected[0]);
   } else {

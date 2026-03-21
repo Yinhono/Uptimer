@@ -243,6 +243,56 @@ describe('scheduler/scheduled regression', () => {
     expect(waitUntil).not.toHaveBeenCalled();
   });
 
+  it('batches persistence for multiple due monitors', async () => {
+    const dueRows = [
+      {
+        id: 111,
+        name: 'API A',
+        type: 'http',
+        target: 'https://example.com/a',
+        interval_sec: 60,
+        timeout_ms: 5000,
+        http_method: 'GET',
+        http_headers_json: null,
+        http_body: null,
+        expected_status_json: null,
+        response_keyword: null,
+        response_forbidden_keyword: null,
+        state_status: 'up',
+        state_last_error: null,
+        last_changed_at: 1700000000,
+        consecutive_failures: 0,
+        consecutive_successes: 3,
+      },
+      {
+        id: 112,
+        name: 'API B',
+        type: 'http',
+        target: 'https://example.com/b',
+        interval_sec: 60,
+        timeout_ms: 5000,
+        http_method: 'GET',
+        http_headers_json: null,
+        http_body: null,
+        expected_status_json: null,
+        response_keyword: null,
+        response_forbidden_keyword: null,
+        state_status: 'up',
+        state_last_error: null,
+        last_changed_at: 1700000000,
+        consecutive_failures: 0,
+        consecutive_successes: 2,
+      },
+    ];
+    const env = createEnv({ dueRows });
+    const batchSpy = vi.spyOn(env.DB, 'batch');
+
+    await runScheduledTick(env, { waitUntil: vi.fn() } as unknown as ExecutionContext);
+
+    expect(runHttpCheck).toHaveBeenCalledTimes(2);
+    expect(batchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('sends monitor.down notification when status changes and monitor is not suppressed', async () => {
     vi.mocked(runHttpCheck).mockResolvedValue({
       status: 'down',
