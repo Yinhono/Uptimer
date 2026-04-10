@@ -21,8 +21,15 @@ import {
 import { runTcpCheck } from '../monitor/tcp';
 import type { CheckOutcome } from '../monitor/types';
 import { dispatchWebhookToChannels, type WebhookChannel } from '../notify/webhook';
-import { computePublicHomepageArtifactPayload } from '../public/homepage';
-import { refreshPublicHomepageArtifactSnapshotIfNeeded } from '../snapshots';
+import {
+  computePublicHomepageArtifactPayload,
+  computePublicHomepagePayload,
+} from '../public/homepage';
+import {
+  refreshPublicHomepageArtifactSnapshotIfNeeded,
+  refreshPublicHomepageSnapshotIfNeeded,
+  wasHomepageRecentlyAccessed,
+} from '../snapshots';
 import { readSettings } from '../settings';
 import { acquireLease } from './lock';
 
@@ -591,14 +598,24 @@ function queueMonitorNotification(
 export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
   const checkedAt = Math.floor(now / 60) * 60;
-  const queueHomepageRefresh = () =>
-    refreshPublicHomepageArtifactSnapshotIfNeeded({
-      db: env.DB,
-      now,
-      compute: () => computePublicHomepageArtifactPayload(env.DB, Math.floor(Date.now() / 1000)),
-    }).catch((err) => {
+  const queueHomepageRefresh = async () => {
+    const refresh = (await wasHomepageRecentlyAccessed(env.DB, now))
+      ? refreshPublicHomepageSnapshotIfNeeded({
+          db: env.DB,
+          now,
+          compute: () => computePublicHomepagePayload(env.DB, Math.floor(Date.now() / 1000)),
+        })
+      : refreshPublicHomepageArtifactSnapshotIfNeeded({
+          db: env.DB,
+          now,
+          compute: () =>
+            computePublicHomepageArtifactPayload(env.DB, Math.floor(Date.now() / 1000)),
+        });
+
+    return refresh.catch((err) => {
       console.warn('homepage snapshot: refresh failed', err);
     });
+  };
 
   const acquired = await acquireLease(env.DB, LOCK_NAME, now, LOCK_LEASE_SECONDS);
   if (!acquired) {

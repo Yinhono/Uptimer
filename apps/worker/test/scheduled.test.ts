@@ -17,19 +17,26 @@ vi.mock('../src/notify/webhook', () => ({
 }));
 vi.mock('../src/public/homepage', () => ({
   computePublicHomepageArtifactPayload: vi.fn(),
+  computePublicHomepagePayload: vi.fn(),
 }));
 vi.mock('../src/snapshots', () => ({
   refreshPublicHomepageArtifactSnapshotIfNeeded: vi.fn(),
+  refreshPublicHomepageSnapshotIfNeeded: vi.fn(),
+  wasHomepageRecentlyAccessed: vi.fn(),
 }));
 
 import type { Env } from '../src/env';
 import { runHttpCheck } from '../src/monitor/http';
 import { runTcpCheck } from '../src/monitor/tcp';
 import { dispatchWebhookToChannels } from '../src/notify/webhook';
-import { computePublicHomepageArtifactPayload } from '../src/public/homepage';
+import { computePublicHomepageArtifactPayload, computePublicHomepagePayload } from '../src/public/homepage';
 import { runScheduledTick } from '../src/scheduler/scheduled';
 import { acquireLease } from '../src/scheduler/lock';
-import { refreshPublicHomepageArtifactSnapshotIfNeeded } from '../src/snapshots';
+import {
+  refreshPublicHomepageArtifactSnapshotIfNeeded,
+  refreshPublicHomepageSnapshotIfNeeded,
+  wasHomepageRecentlyAccessed,
+} from '../src/snapshots';
 import { readSettings } from '../src/settings';
 import { createFakeD1Database, type FakeD1QueryHandler } from './helpers/fake-d1';
 
@@ -140,7 +147,12 @@ describe('scheduler/scheduled regression', () => {
     vi.mocked(computePublicHomepageArtifactPayload).mockResolvedValue({
       generated_at: Math.floor(Date.now() / 1000),
     } as never);
+    vi.mocked(computePublicHomepagePayload).mockResolvedValue({
+      generated_at: Math.floor(Date.now() / 1000),
+    } as never);
     vi.mocked(refreshPublicHomepageArtifactSnapshotIfNeeded).mockResolvedValue(false);
+    vi.mocked(refreshPublicHomepageSnapshotIfNeeded).mockResolvedValue(false);
+    vi.mocked(wasHomepageRecentlyAccessed).mockResolvedValue(false);
     vi.mocked(runHttpCheck).mockResolvedValue({
       status: 'up',
       latencyMs: 21,
@@ -183,6 +195,7 @@ describe('scheduler/scheduled regression', () => {
 
     expect(acquireLease).toHaveBeenCalledWith(env.DB, 'scheduler:tick', expectedNow, 55);
     expect(readSettings).toHaveBeenCalledTimes(1);
+    expect(wasHomepageRecentlyAccessed).toHaveBeenCalledWith(env.DB, expectedNow);
     expect(refreshPublicHomepageArtifactSnapshotIfNeeded).toHaveBeenCalledWith({
       db: env.DB,
       now: expectedNow,
@@ -192,6 +205,30 @@ describe('scheduler/scheduled regression', () => {
     expect(refreshArgs).toBeDefined();
     await refreshArgs?.compute();
     expect(computePublicHomepageArtifactPayload).toHaveBeenCalledWith(env.DB, expectedNow);
+    expect(waitUntil).toHaveBeenCalledTimes(1);
+  });
+
+  it('switches to full homepage snapshot refresh when homepage traffic was seen recently', async () => {
+    vi.mocked(wasHomepageRecentlyAccessed).mockResolvedValue(true);
+
+    const env = createEnv({ dueRows: [] });
+    const waitUntil = vi.fn();
+    const expectedNow = Math.floor(Date.now() / 1000);
+
+    await runScheduledTick(env, { waitUntil } as unknown as ExecutionContext);
+
+    expect(wasHomepageRecentlyAccessed).toHaveBeenCalledWith(env.DB, expectedNow);
+    expect(refreshPublicHomepageSnapshotIfNeeded).toHaveBeenCalledWith({
+      db: env.DB,
+      now: expectedNow,
+      compute: expect.any(Function),
+    });
+    expect(refreshPublicHomepageArtifactSnapshotIfNeeded).not.toHaveBeenCalled();
+
+    const refreshArgs = vi.mocked(refreshPublicHomepageSnapshotIfNeeded).mock.calls[0]?.[0];
+    expect(refreshArgs).toBeDefined();
+    await refreshArgs?.compute();
+    expect(computePublicHomepagePayload).toHaveBeenCalledWith(env.DB, expectedNow);
     expect(waitUntil).toHaveBeenCalledTimes(1);
   });
 

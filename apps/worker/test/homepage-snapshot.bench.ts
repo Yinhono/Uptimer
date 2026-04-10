@@ -485,6 +485,10 @@ async function runOneRouteRead(scenario: RouteReadScenario): Promise<RouteReadSa
                 }
               : null,
         },
+        {
+          match: 'insert into public_snapshots',
+          run: () => ({ meta: { changes: 1 } }),
+        },
       ]),
       ADMIN_TOKEN: 'test-admin-token',
     } as unknown as Env;

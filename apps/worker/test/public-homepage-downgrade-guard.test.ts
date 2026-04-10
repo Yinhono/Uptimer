@@ -183,8 +183,10 @@ describe('public homepage downgrade guard', () => {
       },
       {
         match: 'insert into public_snapshots',
-        run: () => {
-          homepageSnapshotWrites += 1;
+        run: (args) => {
+          if (args[0] === 'homepage') {
+            homepageSnapshotWrites += 1;
+          }
           return 1;
         },
       },
@@ -257,8 +259,10 @@ describe('public homepage downgrade guard', () => {
       },
       {
         match: 'insert into public_snapshots',
-        run: () => {
-          homepageSnapshotWrites += 1;
+        run: (args) => {
+          if (args[0] === 'homepage') {
+            homepageSnapshotWrites += 1;
+          }
           return 1;
         },
       },

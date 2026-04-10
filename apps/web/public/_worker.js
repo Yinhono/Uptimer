@@ -1,5 +1,4 @@
 const SNAPSHOT_MAX_AGE_SECONDS = 60;
-const PREFERRED_MAX_AGE_SECONDS = 30;
 const FALLBACK_HTML_MAX_AGE_SECONDS = 600;
 
 function acceptsHtml(request) {
@@ -85,9 +84,7 @@ html.dark #uptimer-preload .ih{border-top-color:#334155}
 
 function computeCacheControl(ageSeconds) {
   const remaining = Math.max(0, SNAPSHOT_MAX_AGE_SECONDS - ageSeconds);
-  const maxAge = Math.min(PREFERRED_MAX_AGE_SECONDS, remaining);
-  const stale = Math.max(0, remaining - maxAge);
-  return `public, max-age=${maxAge}, stale-while-revalidate=${stale}, stale-if-error=${stale}`;
+  return `public, max-age=${remaining}, stale-while-revalidate=0, stale-if-error=0`;
 }
 
 function upsertHeadTag(html, pattern, tag) {

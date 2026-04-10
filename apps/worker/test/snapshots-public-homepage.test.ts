@@ -11,15 +11,20 @@ import {
   getHomepageSnapshotKey,
   getHomepageSnapshotMaxAgeSeconds,
   getHomepageSnapshotMaxStaleSeconds,
+  markHomepageAccessIfNeeded,
   refreshPublicHomepageArtifactSnapshotIfNeeded,
   readHomepageSnapshot,
+  readHomepageSnapshotJson,
   readHomepageSnapshotArtifact,
   readStaleHomepageSnapshot,
+  readStaleHomepageSnapshotJson,
   readStaleHomepageSnapshotArtifact,
   refreshPublicHomepageSnapshotIfNeeded,
   toHomepageSnapshotPayload,
+  wasHomepageRecentlyAccessed,
   writeHomepageArtifactSnapshot,
   writeHomepageDataSnapshot,
+  writeHomepageDataSnapshotJson,
   writeHomepageSnapshot,
 } from '../src/snapshots/public-homepage';
 import { createFakeD1Database } from './helpers/fake-d1';
@@ -132,6 +137,32 @@ describe('snapshots/public-homepage', () => {
     });
     await expect(readStaleHomepageSnapshotArtifact(db, 200)).resolves.toEqual({
       data: storedRender,
+      age: 10,
+    });
+  });
+
+  it('reads fresh and bounded-stale homepage snapshot JSON without reparsing the hot path', async () => {
+    const payload = samplePayload(190);
+    const bodyJson = JSON.stringify(payload);
+    const db = createFakeD1Database([
+      {
+        match: 'from public_snapshots',
+        first: (args) =>
+          args[0] === 'homepage'
+            ? {
+                generated_at: payload.generated_at,
+                body_json: bodyJson,
+              }
+            : null,
+      },
+    ]);
+
+    await expect(readHomepageSnapshotJson(db, 200)).resolves.toEqual({
+      bodyJson,
+      age: 10,
+    });
+    await expect(readStaleHomepageSnapshotJson(db, 200)).resolves.toEqual({
+      bodyJson,
       age: 10,
     });
   });
@@ -277,7 +308,7 @@ describe('snapshots/public-homepage', () => {
     const fresh = new Response('ok');
     applyHomepageCacheHeaders(fresh, 10);
     expect(fresh.headers.get('Cache-Control')).toBe(
-      'public, max-age=30, stale-while-revalidate=20, stale-if-error=20',
+      'public, max-age=50, stale-while-revalidate=0, stale-if-error=0',
     );
 
     const stale = new Response('ok');
@@ -298,10 +329,16 @@ describe('snapshots/public-homepage', () => {
     const db = createFakeD1Database([
       {
         match: 'from public_snapshots',
-        first: () => ({
-          generated_at: 1_728_000_031,
-          body_json: JSON.stringify(samplePayload(1_728_000_031)),
-        }),
+        first: (args) =>
+          args[0] === 'homepage' || args[0] === 'homepage:artifact'
+            ? {
+                generated_at: 1_728_000_031,
+                body_json:
+                  args[0] === 'homepage'
+                    ? JSON.stringify(samplePayload(1_728_000_031))
+                    : JSON.stringify(buildHomepageRenderArtifact(samplePayload(1_728_000_031))),
+              }
+            : null,
       },
     ]);
 
@@ -316,26 +353,25 @@ describe('snapshots/public-homepage', () => {
   it('refreshes once when the minute changed and a refresh lease is acquired', async () => {
     vi.mocked(acquireLease).mockResolvedValue(true);
 
-    let readCount = 0;
+    let dataGeneratedAt = 1_728_000_001;
+    let artifactGeneratedAt = 1_728_000_001;
     const writtenArgs: unknown[][] = [];
     const now = 1_728_000_120;
     const db = createFakeD1Database([
       {
         match: 'from public_snapshots',
         first: (args) => {
-          if (args[0] !== 'homepage') {
+          if (args[0] !== 'homepage' && args[0] !== 'homepage:artifact') {
             return null;
           }
-          readCount += 1;
-          if (readCount <= 2) {
-            return {
-              generated_at: 1_728_000_001,
-              body_json: JSON.stringify(samplePayload(1_728_000_001)),
-            };
-          }
+
+          const generatedAt = args[0] === 'homepage' ? dataGeneratedAt : artifactGeneratedAt;
           return {
-            generated_at: now,
-            body_json: JSON.stringify(samplePayload(now)),
+            generated_at: generatedAt,
+            body_json:
+              args[0] === 'homepage'
+                ? JSON.stringify(samplePayload(generatedAt))
+                : JSON.stringify(buildHomepageRenderArtifact(samplePayload(generatedAt))),
           };
         },
       },
@@ -343,6 +379,12 @@ describe('snapshots/public-homepage', () => {
         match: 'insert into public_snapshots',
         run: (args) => {
           writtenArgs.push(args);
+          if (args[0] === 'homepage') {
+            dataGeneratedAt = Number(args[1]);
+          }
+          if (args[0] === 'homepage:artifact') {
+            artifactGeneratedAt = Number(args[1]);
+          }
           return { meta: { changes: 1 } };
         },
       },
@@ -428,5 +470,59 @@ describe('snapshots/public-homepage', () => {
     await writeHomepageDataSnapshot(db, 300, payload);
 
     expect(boundArgs).toEqual([['homepage', 280, JSON.stringify(payload), 300]]);
+  });
+
+  it('writes pre-serialized homepage snapshot JSON without extra normalization work', async () => {
+    const boundArgs: unknown[][] = [];
+    const db = createFakeD1Database([
+      {
+        match: 'insert into public_snapshots',
+        run: (args) => {
+          boundArgs.push(args);
+          return { meta: { changes: 1 } };
+        },
+      },
+    ]);
+
+    const payload = samplePayload(280);
+    const bodyJson = JSON.stringify(payload);
+    await writeHomepageDataSnapshotJson(db, 300, payload.generated_at, bodyJson);
+
+    expect(boundArgs).toEqual([['homepage', 280, bodyJson, 300]]);
+  });
+
+  it('marks homepage access at most once per minute and exposes recent-access checks', async () => {
+    let accessGeneratedAt: number | null = null;
+    const writes: unknown[][] = [];
+    const db = createFakeD1Database([
+      {
+        match: 'from public_snapshots',
+        first: (args) =>
+          args[0] === 'homepage:access' && accessGeneratedAt !== null
+            ? {
+                generated_at: accessGeneratedAt,
+                body_json: '{}',
+              }
+            : null,
+      },
+      {
+        match: 'insert into public_snapshots',
+        run: (args) => {
+          writes.push(args);
+          if (args[0] === 'homepage:access') {
+            accessGeneratedAt = Number(args[1]);
+          }
+          return { meta: { changes: 1 } };
+        },
+      },
+    ]);
+
+    await expect(wasHomepageRecentlyAccessed(db, 1_728_000_120)).resolves.toBe(false);
+    await expect(markHomepageAccessIfNeeded(db, 1_728_000_120)).resolves.toBe(true);
+    await expect(markHomepageAccessIfNeeded(db, 1_728_000_125)).resolves.toBe(false);
+    await expect(wasHomepageRecentlyAccessed(db, 1_728_000_170)).resolves.toBe(true);
+    await expect(wasHomepageRecentlyAccessed(db, 1_728_000_400)).resolves.toBe(false);
+
+    expect(writes).toEqual([['homepage:access', 1_728_000_120, '{}', 1_728_000_120]]);
   });
 });
