@@ -72,6 +72,49 @@ describe('pages homepage worker', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('recomputes cache-control on cache hit with generated-at header', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-02-17T00:01:00.000Z'));
+
+    try {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const generatedAt = nowSec - 10;
+
+      installDefaultCacheMock((request) =>
+        request.url === 'https://status.example.com/'
+          ? new Response('<html>cached homepage</html>', {
+              status: 200,
+              headers: {
+                'X-Uptimer-Generated-At': String(generatedAt),
+                'Cache-Control': 'public, max-age=600',
+              },
+            })
+          : undefined,
+      );
+      const env = makeEnv();
+      const fetchSpy = vi.fn();
+      globalThis.fetch = fetchSpy as never;
+
+      const res = await pageWorker.fetch(
+        new Request('https://status.example.com/', {
+          headers: { Accept: 'text/html' },
+        }),
+        env,
+        { waitUntil: vi.fn() },
+      );
+
+      expect(await res.text()).toContain('cached homepage');
+      expect(res.headers.get('X-Uptimer-Generated-At')).toBeNull();
+      expect(res.headers.get('Cache-Control')).toBe(
+        'public, max-age=30, stale-while-revalidate=20, stale-if-error=20',
+      );
+      expect(env.ASSETS.fetch).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('falls back to the cached injected homepage when snapshot fetch fails', async () => {
     installDefaultCacheMock((request) =>
       request.url === 'https://status.example.com/'
