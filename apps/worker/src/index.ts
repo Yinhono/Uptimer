@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 
 import type { Env } from './env';
 import { handleError, handleNotFound } from './middleware/errors';
-import { publicRoutes } from './routes/public';
+import { publicHotRoutes } from './routes/public-hot';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -79,7 +79,7 @@ app.notFound(handleNotFound);
 
 app.get('/', (c) => c.text('ok'));
 
-app.route('/api/v1/public', publicRoutes);
+app.route('/api/v1/public', publicHotRoutes);
 
 // Admin endpoints are rarely hit compared to the public status page. Lazily load the
 // admin router so cold-start CPU stays focused on the homepage hot path.
