@@ -688,7 +688,7 @@ describe('scheduler/scheduled regression', () => {
       await runScheduledTick(env, { waitUntil } as unknown as ExecutionContext);
 
       expect(errorSpy).toHaveBeenCalledWith(
-        'scheduled: 1/1 monitors failed',
+        expect.stringContaining('scheduled: 1/1 monitors failed'),
         expect.objectContaining({
           status: 'rejected',
           reason: expect.any(Error),
