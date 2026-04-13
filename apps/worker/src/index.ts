@@ -2,13 +2,43 @@ import { Hono } from 'hono';
 
 import type { Env } from './env';
 import { handleError, handleNotFound } from './middleware/errors';
-import { adminRoutes } from './routes/admin';
 import { publicRoutes } from './routes/public';
-import { runDailyRollup } from './scheduler/daily-rollup';
-import { runRetention } from './scheduler/retention';
-import { runScheduledTick } from './scheduler/scheduled';
 
 const app = new Hono<{ Bindings: Env }>();
+
+function appendVaryHeader(res: Response, value: string): void {
+  const next = value.trim();
+  if (!next) return;
+  const existing = res.headers.get('Vary');
+  if (!existing) {
+    res.headers.set('Vary', next);
+    return;
+  }
+  const parts = existing.split(',').map((part) => part.trim().toLowerCase());
+  if (parts.includes(next.toLowerCase())) return;
+  res.headers.set('Vary', `${existing}, ${next}`);
+}
+
+function applyCorsHeaders(res: Response, origin: string | null): Response {
+  if (!origin) return res;
+  const out = new Response(res.body, res);
+  out.headers.set('Access-Control-Allow-Origin', origin);
+  appendVaryHeader(out, 'Origin');
+  out.headers.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  out.headers.set('Access-Control-Allow-Headers', 'Authorization,Content-Type');
+  return out;
+}
+
+function rewriteAdminRequest(req: Request): Request {
+  const url = new URL(req.url);
+  const prefix = '/api/v1/admin';
+  if (url.pathname === prefix) {
+    url.pathname = '/';
+  } else if (url.pathname.startsWith(`${prefix}/`)) {
+    url.pathname = url.pathname.slice(prefix.length);
+  }
+  return new Request(url.toString(), req);
+}
 
 // Minimal CORS support so Pages (or any web UI) can call the API when hosted on a different origin
 // (e.g. Pages on *.pages.dev and API on *.workers.dev). We reflect the Origin to keep it simple and
@@ -50,17 +80,34 @@ app.notFound(handleNotFound);
 app.get('/', (c) => c.text('ok'));
 
 app.route('/api/v1/public', publicRoutes);
-app.route('/api/v1/admin', adminRoutes);
+
+// Admin endpoints are rarely hit compared to the public status page. Lazily load the
+// admin router so cold-start CPU stays focused on the homepage hot path.
+app.all('/api/v1/admin', async (c) => {
+  const { adminRoutes } = await import('./routes/admin');
+  const res = await adminRoutes.fetch(rewriteAdminRequest(c.req.raw), c.env, c.executionCtx);
+  return applyCorsHeaders(res, c.req.header('Origin') ?? null);
+});
+app.all('/api/v1/admin/*', async (c) => {
+  const { adminRoutes } = await import('./routes/admin');
+  const res = await adminRoutes.fetch(rewriteAdminRequest(c.req.raw), c.env, c.executionCtx);
+  return applyCorsHeaders(res, c.req.header('Origin') ?? null);
+});
 
 export default {
   fetch: app.fetch,
   scheduled: async (controller: ScheduledController, env: Env, ctx: ExecutionContext) => {
     if (controller.cron === '0 0 * * *') {
+      const [{ runRetention }, { runDailyRollup }] = await Promise.all([
+        import('./scheduler/retention'),
+        import('./scheduler/daily-rollup'),
+      ]);
       await runRetention(env, controller);
       await runDailyRollup(env, controller, ctx);
       return;
     }
 
+    const { runScheduledTick } = await import('./scheduler/scheduled');
     await runScheduledTick(env, ctx);
   },
 };
