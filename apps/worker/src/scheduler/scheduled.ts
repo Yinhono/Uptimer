@@ -631,6 +631,7 @@ async function persistCompletedMonitors(
 export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
   const checkedAt = Math.floor(now / 60) * 60;
+  const totalStart = performance.now();
   const queueHomepageRefresh = (context: HomepageRefreshContext = {}) =>
     env.SELF
       ? refreshHomepageSnapshotViaService(env, context).catch(async (err) => {
@@ -653,6 +654,7 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
     listDueMonitors(env.DB, checkedAt),
     hasActiveWebhookChannels(env.DB),
   ]);
+  const setupDurMs = performance.now() - totalStart;
 
   let notificationsModule: typeof import('./notifications') | null = null;
   let notify: NotifyContext | null = null;
@@ -686,26 +688,34 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
       : await notificationsModule.listMaintenanceSuppressedMonitorIds(env.DB, now, dueMonitorIds);
 
   const limit = pLimit(CHECK_CONCURRENCY);
+  const checksStart = performance.now();
   const settled = await Promise.allSettled(
     due.map((m) =>
       limit(() => runDueMonitor(m, checkedAt, suppressedMonitorIds.has(m.id), stateMachineConfig)),
     ),
   );
+  const checksDurMs = performance.now() - checksStart;
 
   const rejected = settled.filter((r) => r.status === 'rejected');
   const completed = settled
     .filter((r): r is PromiseFulfilledResult<CompletedDueMonitor> => r.status === 'fulfilled')
     .map((r) => r.value);
   const runtimeUpdates = completed.map(toMonitorRuntimeUpdate);
+  let persistDurMs = 0;
+  let runtimeSnapshotDurMs = 0;
 
   if (completed.length > 0) {
+    const persistStart = performance.now();
     await persistCompletedMonitors(env.DB, completed);
+    persistDurMs = performance.now() - persistStart;
+    const runtimeSnapshotStart = performance.now();
     await refreshPublicMonitorRuntimeSnapshot({
       db: env.DB,
       now,
       updates: runtimeUpdates,
       rebuild: async () => await rebuildPublicMonitorRuntimeSnapshot(env.DB, now),
     });
+    runtimeSnapshotDurMs = performance.now() - runtimeSnapshotStart;
 
     if (notificationsModule) {
       for (const monitor of completed) {
@@ -737,12 +747,12 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
 
   if (rejected.length > 0) {
     console.error(
-      `scheduled: ${rejected.length}/${settled.length} monitors failed at ${checkedAt} attempts=${attemptTotal} http=${httpCount} tcp=${tcpCount} assertions=${assertionCount} down=${downCount} unknown=${unknownCount}`,
+      `scheduled: ${rejected.length}/${settled.length} monitors failed at ${checkedAt} attempts=${attemptTotal} http=${httpCount} tcp=${tcpCount} assertions=${assertionCount} down=${downCount} unknown=${unknownCount} dur_setup=${setupDurMs.toFixed(2)} dur_checks=${checksDurMs.toFixed(2)} dur_persist=${persistDurMs.toFixed(2)} dur_runtime=${runtimeSnapshotDurMs.toFixed(2)} dur_total=${(performance.now() - totalStart).toFixed(2)}`,
       rejected[0],
     );
   } else {
     console.log(
-      `scheduled: processed ${settled.length} monitors at ${checkedAt} attempts=${attemptTotal} http=${httpCount} tcp=${tcpCount} assertions=${assertionCount} down=${downCount} unknown=${unknownCount}`,
+      `scheduled: processed ${settled.length} monitors at ${checkedAt} attempts=${attemptTotal} http=${httpCount} tcp=${tcpCount} assertions=${assertionCount} down=${downCount} unknown=${unknownCount} dur_setup=${setupDurMs.toFixed(2)} dur_checks=${checksDurMs.toFixed(2)} dur_persist=${persistDurMs.toFixed(2)} dur_runtime=${runtimeSnapshotDurMs.toFixed(2)} dur_total=${(performance.now() - totalStart).toFixed(2)}`,
     );
   }
 
