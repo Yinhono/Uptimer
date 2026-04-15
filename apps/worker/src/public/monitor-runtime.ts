@@ -69,6 +69,10 @@ export type MonitorRuntimeUpdate = {
   latency_ms: number | null;
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
 function parseHeartbeatGapSec(value: string): number[] {
   const trimmed = value.trim();
   if (!trimmed) return [];
@@ -120,7 +124,24 @@ export function runtimeHeartbeatsToGapSec(
 }
 
 const runtimeEntrySchema = z
-  .object({
+  .preprocess((value) => {
+    if (!isRecord(value)) return value;
+    if (typeof value.heartbeat_gap_sec === 'string') {
+      return value;
+    }
+
+    const legacyCheckedAt = value.heartbeat_checked_at;
+    if (!Array.isArray(legacyCheckedAt)) {
+      return value;
+    }
+
+    return {
+      ...value,
+      heartbeat_gap_sec: runtimeHeartbeatsToGapSec(
+        legacyCheckedAt.filter((item): item is number => Number.isInteger(item)),
+      ),
+    };
+  }, z.object({
     monitor_id: z.number().int().positive(),
     interval_sec: z.number().int().positive(),
     range_start_at: z.number().int().nonnegative().nullable(),
@@ -137,7 +158,7 @@ const runtimeEntrySchema = z
       .array(z.number().int().nonnegative().nullable())
       .max(MONITOR_RUNTIME_HEARTBEAT_POINTS),
     heartbeat_status_codes: z.string().max(MONITOR_RUNTIME_HEARTBEAT_POINTS),
-  })
+  }))
   .superRefine((value, ctx) => {
     const count = value.heartbeat_latency_ms.length;
     if (value.heartbeat_latency_ms.length !== count) {
