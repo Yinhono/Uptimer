@@ -12,23 +12,11 @@ const SPLIT_SNAPSHOT_VERSION = 3;
 const LEGACY_COMBINED_SNAPSHOT_VERSION = 2;
 type SnapshotKey = typeof SNAPSHOT_KEY | typeof SNAPSHOT_ARTIFACT_KEY;
 
-const READ_SNAPSHOT_SQL = `
-  SELECT generated_at, body_json
-  FROM public_snapshots
-  WHERE key = ?1
-`;
-const READ_SNAPSHOT_METADATA_SQL = `
-  SELECT generated_at, updated_at
-  FROM public_snapshots
-  WHERE key = ?1
-`;
 const READ_REFRESH_SNAPSHOT_ROWS_SQL = `
   SELECT key, generated_at, updated_at, body_json
   FROM public_snapshots
   WHERE key = ?1 OR key = ?2
 `;
-const readSnapshotStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
-const readSnapshotMetadataStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const readRefreshSnapshotRowsStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const normalizedHomepagePayloadCacheByDb = new WeakMap<
   D1Database,
@@ -39,18 +27,10 @@ const normalizedHomepageArtifactCacheByDb = new WeakMap<
   Map<SnapshotKey, NormalizedSnapshotRow>
 >();
 
-type SnapshotRow = {
+type SnapshotRefreshRow = {
+  key: SnapshotKey;
   generated_at: number;
   body_json: string;
-};
-
-type SnapshotRefreshRow = SnapshotRow & {
-  key: SnapshotKey;
-  updated_at?: number | null;
-};
-
-type SnapshotMetadataRow = {
-  generated_at: number;
   updated_at?: number | null;
 };
 
@@ -116,14 +96,13 @@ function normalizeDirectHomepagePayload(
   return normalizedPayload.success ? JSON.stringify(normalizedPayload.data) : null;
 }
 
-function normalizeHomepagePayloadBodyJson(bodyJson: string): string | null {
+function normalizeHomepagePayloadBodyJsonForKey(
+  key: SnapshotKey,
+  bodyJson: string,
+): string | null {
   const parsed = parseJsonText(bodyJson);
   if (parsed === null) return null;
 
-  const artifact = publicHomepageRenderArtifactSchema.safeParse(parsed.value);
-  if (artifact.success) {
-    return JSON.stringify(artifact.data.snapshot);
-  }
   if (!isRecord(parsed.value)) {
     return null;
   }
@@ -133,7 +112,19 @@ function normalizeHomepagePayloadBodyJson(bodyJson: string): string | null {
     return normalizeDirectHomepagePayload(parsed.value.data, null);
   }
 
-  return normalizeDirectHomepagePayload(parsed.value, parsed.trimmed);
+  if (key === SNAPSHOT_KEY) {
+    const directPayload = normalizeDirectHomepagePayload(parsed.value, parsed.trimmed);
+    if (directPayload) {
+      return directPayload;
+    }
+  }
+
+  const artifact = publicHomepageRenderArtifactSchema.safeParse(parsed.value);
+  if (artifact.success) {
+    return JSON.stringify(artifact.data.snapshot);
+  }
+
+  return key === SNAPSHOT_KEY ? null : normalizeDirectHomepagePayload(parsed.value, parsed.trimmed);
 }
 
 function normalizeHomepageArtifactBodyJson(bodyJson: string): string | null {
@@ -157,7 +148,7 @@ function normalizeHomepageArtifactBodyJson(bodyJson: string): string | null {
   return legacyArtifact.success ? JSON.stringify(legacyArtifact.data) : null;
 }
 
-function toSnapshotUpdatedAt(row: SnapshotMetadataRow): number {
+function toSnapshotUpdatedAt(row: Pick<SnapshotRefreshRow, 'generated_at' | 'updated_at'>): number {
   return typeof row.updated_at === 'number' && Number.isFinite(row.updated_at)
     ? row.updated_at
     : row.generated_at;
@@ -212,42 +203,6 @@ function isSameUtcDay(a: number, b: number): boolean {
   return Math.floor(a / 86_400) === Math.floor(b / 86_400);
 }
 
-async function readSnapshotRow(
-  db: D1Database,
-  key: string,
-): Promise<SnapshotRow | null> {
-  try {
-    const cached = readSnapshotStatementByDb.get(db);
-    const statement = cached ?? db.prepare(READ_SNAPSHOT_SQL);
-    if (!cached) {
-      readSnapshotStatementByDb.set(db, statement);
-    }
-
-    return await statement.bind(key).first<SnapshotRow>();
-  } catch (err) {
-    console.warn('homepage snapshot: read failed', err);
-    return null;
-  }
-}
-
-async function readSnapshotMetadataRow(
-  db: D1Database,
-  key: SnapshotKey,
-): Promise<SnapshotMetadataRow | null> {
-  try {
-    const cached = readSnapshotMetadataStatementByDb.get(db);
-    const statement = cached ?? db.prepare(READ_SNAPSHOT_METADATA_SQL);
-    if (!cached) {
-      readSnapshotMetadataStatementByDb.set(db, statement);
-    }
-
-    return await statement.bind(key).first<SnapshotMetadataRow>();
-  } catch (err) {
-    console.warn('homepage snapshot: metadata read failed', err);
-    return null;
-  }
-}
-
 async function readRefreshSnapshotRows(
   db: D1Database,
 ): Promise<SnapshotRefreshRow[]> {
@@ -266,6 +221,16 @@ async function readRefreshSnapshotRows(
     console.warn('homepage snapshot: refresh rows read failed', err);
     return [];
   }
+}
+
+function listSnapshotCandidatesFromRefreshRows(
+  rows: readonly SnapshotRefreshRow[],
+): SnapshotCandidate[] {
+  return rows.map((row) => ({
+    key: row.key,
+    generatedAt: row.generated_at,
+    updatedAt: toSnapshotUpdatedAt(row),
+  }));
 }
 
 function comparePayloadCandidates(a: SnapshotCandidate, b: SnapshotCandidate): number {
@@ -288,47 +253,24 @@ function compareArtifactCandidates(a: SnapshotCandidate, b: SnapshotCandidate): 
   return a.key === SNAPSHOT_ARTIFACT_KEY ? -1 : 1;
 }
 
-async function listSnapshotCandidates(db: D1Database): Promise<SnapshotCandidate[]> {
-  const [artifactRow, homepageRow] = await Promise.all([
-    readSnapshotMetadataRow(db, SNAPSHOT_ARTIFACT_KEY),
-    readSnapshotMetadataRow(db, SNAPSHOT_KEY),
-  ]);
-
-  const candidates: SnapshotCandidate[] = [];
-  if (homepageRow) {
-    candidates.push({
-      key: SNAPSHOT_KEY,
-      generatedAt: homepageRow.generated_at,
-      updatedAt: toSnapshotUpdatedAt(homepageRow),
-    });
-  }
-  if (artifactRow) {
-    candidates.push({
-      key: SNAPSHOT_ARTIFACT_KEY,
-      generatedAt: artifactRow.generated_at,
-      updatedAt: toSnapshotUpdatedAt(artifactRow),
-    });
-  }
-  return candidates;
-}
-
-async function readValidatedSnapshotCandidate(opts: {
+function readValidatedSnapshotCandidateFromRefreshRows(opts: {
   db: D1Database;
   candidate: SnapshotCandidate;
-  normalize: (bodyJson: string) => string | null;
+  rowByKey: ReadonlyMap<SnapshotKey, SnapshotRefreshRow>;
+  normalize: (candidate: SnapshotCandidate, bodyJson: string) => string | null;
   cacheByDb: WeakMap<D1Database, Map<SnapshotKey, NormalizedSnapshotRow>>;
-}): Promise<CandidateReadResult> {
+}): CandidateReadResult {
   const cached = readCachedNormalizedSnapshotRow(opts.cacheByDb, opts.db, opts.candidate);
   if (cached) {
     return { row: cached, invalid: false };
   }
 
-  const row = await readSnapshotRow(opts.db, opts.candidate.key);
+  const row = opts.rowByKey.get(opts.candidate.key);
   if (!row || row.generated_at !== opts.candidate.generatedAt) {
     return { row: null, invalid: false };
   }
 
-  const bodyJson = opts.normalize(row.body_json);
+  const bodyJson = opts.normalize(opts.candidate, row.body_json);
   if (!bodyJson) {
     return { row: null, invalid: true };
   }
@@ -339,18 +281,22 @@ async function readValidatedSnapshotCandidate(opts: {
   };
 }
 
-async function readFirstValidPayloadCandidate(
-  db: D1Database,
-  candidates: readonly SnapshotCandidate[],
-): Promise<{ row: NormalizedSnapshotRow | null; invalid: boolean }> {
+function readFirstValidCandidateFromRefreshRows(opts: {
+  db: D1Database;
+  candidates: readonly SnapshotCandidate[];
+  rowByKey: ReadonlyMap<SnapshotKey, SnapshotRefreshRow>;
+  normalize: (candidate: SnapshotCandidate, bodyJson: string) => string | null;
+  cacheByDb: WeakMap<D1Database, Map<SnapshotKey, NormalizedSnapshotRow>>;
+}): { row: NormalizedSnapshotRow | null; invalid: boolean } {
   let invalid = false;
 
-  for (const candidate of candidates) {
-    const result = await readValidatedSnapshotCandidate({
-      db,
+  for (const candidate of opts.candidates) {
+    const result = readValidatedSnapshotCandidateFromRefreshRows({
+      db: opts.db,
       candidate,
-      normalize: normalizeHomepagePayloadBodyJson,
-      cacheByDb: normalizedHomepagePayloadCacheByDb,
+      rowByKey: opts.rowByKey,
+      normalize: opts.normalize,
+      cacheByDb: opts.cacheByDb,
     });
     if (result.invalid) {
       invalid = true;
@@ -370,25 +316,34 @@ async function readFirstValidPayloadCandidate(
 }
 
 export async function readHomepageSnapshotGeneratedAt(db: D1Database): Promise<number | null> {
-  const { row } = await readFirstValidPayloadCandidate(
+  const refreshRows = await readRefreshSnapshotRows(db);
+  const rowByKey = new Map(refreshRows.map((row) => [row.key, row]));
+  const { row } = readFirstValidCandidateFromRefreshRows({
     db,
-    (await listSnapshotCandidates(db)).sort(comparePayloadCandidates),
-  );
+    candidates: listSnapshotCandidatesFromRefreshRows(refreshRows).sort(comparePayloadCandidates),
+    rowByKey,
+    normalize: (candidate, bodyJson) =>
+      normalizeHomepagePayloadBodyJsonForKey(candidate.key, bodyJson),
+    cacheByDb: normalizedHomepagePayloadCacheByDb,
+  });
   return row?.generatedAt ?? null;
 }
 
 export async function readHomepageArtifactSnapshotGeneratedAt(
   db: D1Database,
 ): Promise<number | null> {
-  const candidates = (await listSnapshotCandidates(db))
+  const refreshRows = await readRefreshSnapshotRows(db);
+  const rowByKey = new Map(refreshRows.map((row) => [row.key, row]));
+  const candidates = listSnapshotCandidatesFromRefreshRows(refreshRows)
     .filter((candidate) => candidate.key === SNAPSHOT_ARTIFACT_KEY)
     .sort(compareArtifactCandidates);
 
   for (const candidate of candidates) {
-    const result = await readValidatedSnapshotCandidate({
+    const result = readValidatedSnapshotCandidateFromRefreshRows({
       db,
       candidate,
-      normalize: normalizeHomepageArtifactBodyJson,
+      rowByKey,
+      normalize: (_candidate, bodyJson) => normalizeHomepageArtifactBodyJson(bodyJson),
       cacheByDb: normalizedHomepageArtifactCacheByDb,
     });
     if (result.row) {
@@ -436,7 +391,7 @@ export async function readHomepageRefreshBaseSnapshot(
         continue;
       }
 
-      const bodyJson = normalizeHomepagePayloadBodyJson(row.body_json);
+      const bodyJson = normalizeHomepagePayloadBodyJsonForKey(candidate.key, row.body_json);
       if (!bodyJson) {
         invalid = true;
         continue;
@@ -511,15 +466,19 @@ export async function readHomepageSnapshotJsonAnyAge(
   now: number,
   maxStaleSeconds = MAX_STALE_SECONDS,
 ): Promise<{ bodyJson: string; age: number } | null> {
-  const candidates = (await listSnapshotCandidates(db))
+  const refreshRows = await readRefreshSnapshotRows(db);
+  const rowByKey = new Map(refreshRows.map((row) => [row.key, row]));
+  const candidates = listSnapshotCandidatesFromRefreshRows(refreshRows)
     .filter((candidate) => Math.max(0, now - candidate.generatedAt) <= maxStaleSeconds)
     .sort(comparePayloadCandidates);
 
   for (const candidate of candidates) {
-    const result = await readValidatedSnapshotCandidate({
+    const result = readValidatedSnapshotCandidateFromRefreshRows({
       db,
       candidate,
-      normalize: normalizeHomepagePayloadBodyJson,
+      rowByKey,
+      normalize: (currentCandidate, bodyJson) =>
+        normalizeHomepagePayloadBodyJsonForKey(currentCandidate.key, bodyJson),
       cacheByDb: normalizedHomepagePayloadCacheByDb,
     });
     if (!result.row) {
@@ -549,15 +508,18 @@ export async function readHomepageSnapshotArtifactJson(
   db: D1Database,
   now: number,
 ): Promise<{ bodyJson: string; age: number } | null> {
-  const candidates = (await listSnapshotCandidates(db))
+  const refreshRows = await readRefreshSnapshotRows(db);
+  const rowByKey = new Map(refreshRows.map((row) => [row.key, row]));
+  const candidates = listSnapshotCandidatesFromRefreshRows(refreshRows)
     .filter((candidate) => Math.max(0, now - candidate.generatedAt) <= MAX_AGE_SECONDS)
     .sort(compareArtifactCandidates);
 
   for (const candidate of candidates) {
-    const result = await readValidatedSnapshotCandidate({
+    const result = readValidatedSnapshotCandidateFromRefreshRows({
       db,
       candidate,
-      normalize: normalizeHomepageArtifactBodyJson,
+      rowByKey,
+      normalize: (_candidate, bodyJson) => normalizeHomepageArtifactBodyJson(bodyJson),
       cacheByDb: normalizedHomepageArtifactCacheByDb,
     });
     if (!result.row) {
@@ -580,15 +542,18 @@ export async function readStaleHomepageSnapshotArtifactJson(
   db: D1Database,
   now: number,
 ): Promise<{ bodyJson: string; age: number } | null> {
-  const candidates = (await listSnapshotCandidates(db))
+  const refreshRows = await readRefreshSnapshotRows(db);
+  const rowByKey = new Map(refreshRows.map((row) => [row.key, row]));
+  const candidates = listSnapshotCandidatesFromRefreshRows(refreshRows)
     .filter((candidate) => Math.max(0, now - candidate.generatedAt) <= MAX_STALE_SECONDS)
     .sort(compareArtifactCandidates);
 
   for (const candidate of candidates) {
-    const result = await readValidatedSnapshotCandidate({
+    const result = readValidatedSnapshotCandidateFromRefreshRows({
       db,
       candidate,
-      normalize: normalizeHomepageArtifactBodyJson,
+      rowByKey,
+      normalize: (_candidate, bodyJson) => normalizeHomepageArtifactBodyJson(bodyJson),
       cacheByDb: normalizedHomepageArtifactCacheByDb,
     });
     if (!result.row) {

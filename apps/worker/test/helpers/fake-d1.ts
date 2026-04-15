@@ -59,11 +59,36 @@ class FakePreparedStatement {
 
   async all<T = unknown>(): Promise<{ results: T[] }> {
     const handler = this.handlers.find((item) => item.all && matchesQuery(this.normalizedSql, item.match));
-    if (!handler || !handler.all) {
+    if (handler?.all) {
+      const rows = await handler.all(this.args, this.normalizedSql);
+      return { results: (rows ?? []) as T[] };
+    }
+
+    const firstHandler = this.handlers.find(
+      (item) => item.first && matchesQuery(this.normalizedSql, item.match),
+    );
+    if (!firstHandler?.first) {
       throw new Error(`No fake D1 all() handler matched SQL: ${this.sql}`);
     }
-    const rows = await handler.all(this.args, this.normalizedSql);
-    return { results: (rows ?? []) as T[] };
+
+    const rows: unknown[] = [];
+    if (this.args.length > 0) {
+      for (const arg of this.args) {
+        const row = withSyntheticKey(
+          await firstHandler.first([arg], this.normalizedSql),
+          arg,
+        );
+        if (row !== null && row !== undefined) {
+          rows.push(row);
+        }
+      }
+      if (rows.length > 0) {
+        return { results: rows as T[] };
+      }
+    }
+
+    const row = withSyntheticKey(await firstHandler.first(this.args, this.normalizedSql), this.args[0]);
+    return { results: row === null || row === undefined ? [] : ([row] as T[]) };
   }
 
   async first<T = unknown>(): Promise<T | null> {
@@ -137,6 +162,19 @@ function toRawRow(row: unknown): unknown {
     return Object.values(row);
   }
   return [row];
+}
+
+function withSyntheticKey(row: unknown, key: unknown): unknown {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) {
+    return row;
+  }
+  if (!('key' in row) && typeof key === 'string') {
+    return {
+      key,
+      ...row,
+    };
+  }
+  return row;
 }
 
 export function createFakeD1Database(handlers: FakeD1QueryHandler[]): D1Database {
