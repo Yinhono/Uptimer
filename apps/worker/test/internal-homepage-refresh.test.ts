@@ -19,7 +19,10 @@ import {
   tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates,
 } from '../src/public/homepage';
 import { acquireLease } from '../src/scheduler/lock';
-import { writeHomepageSnapshot } from '../src/snapshots/public-homepage';
+import {
+  toHomepageSnapshotPayload,
+  writeHomepageSnapshot,
+} from '../src/snapshots/public-homepage';
 import { createFakeD1Database } from './helpers/fake-d1';
 
 function createBaseSnapshot(now: number) {
@@ -181,6 +184,7 @@ describe('internal homepage refresh route', () => {
     expect(res.status).toBe(200);
     expect(tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates).toHaveBeenCalledTimes(1);
     expect(computePublicHomepagePayload).not.toHaveBeenCalled();
+    expect(toHomepageSnapshotPayload).not.toHaveBeenCalled();
     expect(writeHomepageSnapshot).toHaveBeenCalledWith(env.DB, now, fastPayload, undefined, false);
     expect(vi.mocked(tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates)).toHaveBeenCalledWith({
       db: env.DB,
@@ -237,5 +241,13 @@ describe('internal homepage refresh route', () => {
       baseSnapshot,
       baseSnapshotBodyJson: null,
     });
+    expect(toHomepageSnapshotPayload).toHaveBeenCalledWith(computedPayload);
+    expect(writeHomepageSnapshot).toHaveBeenCalledWith(
+      env.DB,
+      now,
+      computedPayload,
+      undefined,
+      false,
+    );
   });
 });

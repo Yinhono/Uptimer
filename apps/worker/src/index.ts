@@ -266,9 +266,9 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
     if (trace?.enabled && fastComputed) {
       trace.setLabel('fast_path', 'scheduled_runtime');
     }
-    const computed = fastComputed
-      ? fastComputed
-      : trace
+    let payload = fastComputed;
+    if (payload === null) {
+      const computed = trace
         ? await trace.timeAsync(
             'homepage_refresh_compute',
             async () =>
@@ -282,11 +282,13 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
             baseSnapshot: baseSnapshot.snapshot,
             baseSnapshotBodyJson: null,
           });
-    const payload = trace
-      ? trace.time('homepage_refresh_validate', () =>
-          snapshotMod.toHomepageSnapshotPayload(computed),
-        )
-      : snapshotMod.toHomepageSnapshotPayload(computed);
+      const validatedPayload = trace
+        ? trace.time('homepage_refresh_validate', () =>
+            snapshotMod.toHomepageSnapshotPayload(computed),
+          )
+        : snapshotMod.toHomepageSnapshotPayload(computed);
+      payload = validatedPayload;
+    }
     if (trace) {
       await trace.timeAsync(
         'homepage_refresh_write',
