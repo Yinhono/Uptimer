@@ -181,7 +181,7 @@ describe('internal homepage refresh route', () => {
     expect(res.status).toBe(200);
     expect(tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates).toHaveBeenCalledTimes(1);
     expect(computePublicHomepagePayload).not.toHaveBeenCalled();
-    expect(toHomepageSnapshotPayload).toHaveBeenCalledWith(fastPayload);
+    expect(toHomepageSnapshotPayload).not.toHaveBeenCalled();
     expect(writeHomepageSnapshot).toHaveBeenCalledWith(env.DB, now, fastPayload, undefined, false);
     expect(
       vi.mocked(tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates),

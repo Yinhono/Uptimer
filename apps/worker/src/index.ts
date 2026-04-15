@@ -240,13 +240,7 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
     if (trace?.enabled && payload) {
       trace.setLabel('fast_path', 'scheduled_runtime');
     }
-    if (payload !== null) {
-      payload = trace
-        ? trace.time('homepage_refresh_fast_validate', () =>
-            snapshotMod.toHomepageSnapshotPayload(payload),
-          )
-        : snapshotMod.toHomepageSnapshotPayload(payload);
-    } else {
+    if (payload === null) {
       const computed = trace
         ? await trace.timeAsync(
             'homepage_refresh_compute',

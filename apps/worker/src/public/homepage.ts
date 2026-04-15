@@ -105,6 +105,46 @@ type HomepageMonitorDataOptions = {
   trace?: Trace;
 };
 
+type HomepageStatementCache = Partial<{
+  listMonitorRows: D1PreparedStatement;
+  listMonitorRowsLimited: D1PreparedStatement;
+  listMonitorRowsIncludingHidden: D1PreparedStatement;
+  listMonitorRowsIncludingHiddenLimited: D1PreparedStatement;
+  monitorMetadataStamp: D1PreparedStatement;
+  monitorMetadataStampIncludingHidden: D1PreparedStatement;
+  scheduledFastGuard: D1PreparedStatement;
+  scheduledFastGuardIncludingHidden: D1PreparedStatement;
+}>;
+
+const homepageStatementCacheByDb = new WeakMap<D1Database, HomepageStatementCache>();
+
+function getHomepageStatementCache(db: D1Database): HomepageStatementCache {
+  const cached = homepageStatementCacheByDb.get(db);
+  if (cached) {
+    return cached;
+  }
+
+  const next: HomepageStatementCache = {};
+  homepageStatementCacheByDb.set(db, next);
+  return next;
+}
+
+function getCachedHomepageStatement(
+  db: D1Database,
+  key: keyof HomepageStatementCache,
+  create: () => D1PreparedStatement,
+): D1PreparedStatement {
+  const cache = getHomepageStatementCache(db);
+  const cached = cache[key];
+  if (cached) {
+    return cached;
+  }
+
+  const statement = create();
+  cache[key] = statement;
+  return statement;
+}
+
 function withTraceSync<T>(trace: Trace | undefined, name: string, fn: () => T): T {
   return trace ? trace.time(name, fn) : fn();
 }
@@ -593,9 +633,19 @@ async function listHomepageMonitorRows(
   includeHiddenMonitors: boolean,
   limit?: number,
 ): Promise<HomepageMonitorRow[]> {
-  const limitClause = limit === undefined ? '' : '\n      LIMIT ?1';
-  const stmt = db.prepare(
-    `
+  const hasLimit = limit !== undefined;
+  const stmt = getCachedHomepageStatement(
+    db,
+    includeHiddenMonitors
+      ? hasLimit
+        ? 'listMonitorRowsIncludingHiddenLimited'
+        : 'listMonitorRowsIncludingHidden'
+      : hasLimit
+        ? 'listMonitorRowsLimited'
+        : 'listMonitorRows',
+    () =>
+      db.prepare(
+        `
       SELECT
         m.id,
         m.name,
@@ -618,8 +668,9 @@ async function listHomepageMonitorRows(
           END
         ) ASC,
         m.sort_order ASC,
-        m.id ASC${limitClause}
+        m.id ASC${hasLimit ? '\n      LIMIT ?1' : ''}
     `,
+      ),
   );
 
   const result =
@@ -634,9 +685,12 @@ async function readHomepageMonitorMetadataStamp(
   db: D1Database,
   includeHiddenMonitors: boolean,
 ): Promise<HomepageMonitorMetadataStamp> {
-  const row = await db
-    .prepare(
-      `
+  const row = await getCachedHomepageStatement(
+    db,
+    includeHiddenMonitors ? 'monitorMetadataStampIncludingHidden' : 'monitorMetadataStamp',
+    () =>
+      db.prepare(
+        `
       SELECT
         COUNT(*) AS monitor_count_total,
         MAX(COALESCE(m.updated_at, m.created_at, 0)) AS max_updated_at
@@ -644,7 +698,8 @@ async function readHomepageMonitorMetadataStamp(
       WHERE m.is_active = 1
         AND ${monitorVisibilityPredicate(includeHiddenMonitors, 'm')}
     `,
-    )
+      ),
+  )
     .first<{
       monitor_count_total: number | null;
       max_updated_at: number | null;
@@ -1651,9 +1706,12 @@ async function readHomepageScheduledFastGuardState(
   const incidentVisibilitySql = incidentStatusPageVisibilityPredicate(includeHiddenMonitors);
   const maintenanceVisibilitySql =
     maintenanceWindowStatusPageVisibilityPredicate(includeHiddenMonitors);
-  const row = await db
-    .prepare(
-      `
+  const row = await getCachedHomepageStatement(
+    db,
+    includeHiddenMonitors ? 'scheduledFastGuardIncludingHidden' : 'scheduledFastGuard',
+    () =>
+      db.prepare(
+        `
       SELECT
         (
           SELECT value
@@ -1728,7 +1786,8 @@ async function readHomepageScheduledFastGuardState(
           LIMIT 1
         ) AS has_maintenance_history_preview
     `,
-    )
+      ),
+  )
     .bind(now)
     .first<{
       site_title_value: string | null;

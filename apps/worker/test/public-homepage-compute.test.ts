@@ -4,6 +4,7 @@ import {
   computePublicHomepagePayload,
   tryPatchPublicHomepagePayloadFromRuntimeUpdates,
 } from '../src/public/homepage';
+import { publicHomepageResponseSchema } from '../src/schemas/public-homepage';
 import { createFakeD1Database, type FakeD1QueryHandler } from './helpers/fake-d1';
 
 describe('computePublicHomepagePayload', () => {
@@ -555,6 +556,7 @@ describe('computePublicHomepagePayload', () => {
     });
 
     expect(patched).not.toBeNull();
+    expect(publicHomepageResponseSchema.safeParse(patched).success).toBe(true);
     expect(patched?.generated_at).toBe(now);
     expect(patched?.summary).toEqual({
       up: 1,
