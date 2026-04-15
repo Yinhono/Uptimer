@@ -26,6 +26,7 @@ import type { NotifyContext } from './notifications';
 
 const LOCK_NAME = 'scheduler:tick';
 const LOCK_LEASE_SECONDS = 55;
+const INTERNAL_SCHEDULED_BATCH_SIZE = 6;
 
 const CHECK_CONCURRENCY = 5;
 const D1_MAX_SQL_VARIABLES = 100;
@@ -80,6 +81,37 @@ type HomepageRefreshServiceResult = {
   refreshed: boolean | null;
 };
 
+type MonitorBatchStats = {
+  processedCount: number;
+  rejectedCount: number;
+  attemptTotal: number;
+  httpCount: number;
+  tcpCount: number;
+  assertionCount: number;
+  downCount: number;
+  unknownCount: number;
+};
+
+type MonitorBatchExecutionResult = {
+  runtimeUpdates: MonitorRuntimeUpdate[];
+  stats: MonitorBatchStats;
+  checksDurMs: number;
+  persistDurMs: number;
+};
+
+type ScheduledCheckBatchServiceResult = MonitorBatchExecutionResult;
+
+type ScheduledCheckBatchServiceContext = {
+  ids: number[];
+  checkedAt: number;
+  suppressedMonitorIds: number[];
+  stateMachineConfig: {
+    failuresToDownFromUp: number;
+    successesToUpFromDown: number;
+  };
+  allowNotifications: boolean;
+};
+
 async function refreshHomepageSnapshotViaService(
   env: Env,
   context: HomepageRefreshContext = {},
@@ -130,6 +162,141 @@ async function refreshHomepageSnapshotViaService(
   };
 }
 
+function toInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) ? value : null;
+}
+
+function toNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function toScheduledCheckBatchServiceResult(value: unknown): ScheduledCheckBatchServiceResult {
+  if (!isRecord(value)) {
+    throw new Error('service batch returned invalid JSON');
+  }
+
+  const runtimeUpdatesValue = value.runtime_updates;
+  if (!Array.isArray(runtimeUpdatesValue)) {
+    throw new Error('service batch missing runtime_updates');
+  }
+
+  const runtimeUpdates: MonitorRuntimeUpdate[] = runtimeUpdatesValue
+    .map((item) => {
+      if (!isRecord(item)) {
+        return null;
+      }
+
+      const monitorId = toInteger(item.monitor_id);
+      const intervalSec = toInteger(item.interval_sec);
+      const createdAt = toInteger(item.created_at);
+      const checkedAt = toInteger(item.checked_at);
+      if (
+        monitorId === null ||
+        monitorId <= 0 ||
+        intervalSec === null ||
+        intervalSec <= 0 ||
+        createdAt === null ||
+        createdAt < 0 ||
+        checkedAt === null ||
+        checkedAt < 0
+      ) {
+        return null;
+      }
+
+      const checkStatus =
+        item.check_status === null || typeof item.check_status === 'string'
+          ? item.check_status
+          : null;
+      const nextStatus =
+        item.next_status === null || typeof item.next_status === 'string'
+          ? item.next_status
+          : null;
+      const latencyMs =
+        item.latency_ms === null ? null : toNumber(item.latency_ms);
+
+      return {
+        monitor_id: monitorId,
+        interval_sec: intervalSec,
+        created_at: createdAt,
+        checked_at: checkedAt,
+        check_status: checkStatus,
+        next_status: nextStatus,
+        latency_ms: latencyMs,
+      };
+    })
+    .filter((item): item is MonitorRuntimeUpdate => item !== null);
+
+  const stats: MonitorBatchStats = {
+    processedCount: Math.max(0, toInteger(value.processed_count) ?? runtimeUpdates.length),
+    rejectedCount: Math.max(0, toInteger(value.rejected_count) ?? 0),
+    attemptTotal: Math.max(0, toInteger(value.attempt_total) ?? 0),
+    httpCount: Math.max(0, toInteger(value.http_count) ?? 0),
+    tcpCount: Math.max(0, toInteger(value.tcp_count) ?? 0),
+    assertionCount: Math.max(0, toInteger(value.assertion_count) ?? 0),
+    downCount: Math.max(0, toInteger(value.down_count) ?? 0),
+    unknownCount: Math.max(0, toInteger(value.unknown_count) ?? 0),
+  };
+
+  return {
+    runtimeUpdates,
+    stats,
+    checksDurMs: Math.max(0, toNumber(value.checks_duration_ms) ?? 0),
+    persistDurMs: Math.max(0, toNumber(value.persist_duration_ms) ?? 0),
+  };
+}
+
+async function runScheduledCheckBatchViaService(
+  env: Env,
+  context: ScheduledCheckBatchServiceContext,
+): Promise<ScheduledCheckBatchServiceResult> {
+  if (!env.SELF) {
+    throw new Error('SELF service binding missing');
+  }
+  if (!env.ADMIN_TOKEN) {
+    throw new Error('ADMIN_TOKEN missing');
+  }
+
+  const res = await env.SELF.fetch(
+    new Request('http://internal/api/v1/internal/scheduled/check-batch', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: JSON.stringify({
+        token: env.ADMIN_TOKEN,
+        ids: context.ids,
+        checked_at: context.checkedAt,
+        suppressed_monitor_ids: context.suppressedMonitorIds,
+        state_failures_to_down_from_up: context.stateMachineConfig.failuresToDownFromUp,
+        state_successes_to_up_from_down: context.stateMachineConfig.successesToUpFromDown,
+        allow_notifications: context.allowNotifications || undefined,
+      }),
+    }),
+  );
+
+  const bodyText = await res.text().catch(() => '');
+  if (!res.ok) {
+    throw new Error(`service check batch failed: HTTP ${res.status} ${bodyText}`.trim());
+  }
+
+  let parsedBody: unknown = null;
+  if (bodyText.trim().length > 0) {
+    try {
+      parsedBody = JSON.parse(bodyText) as unknown;
+    } catch (err) {
+      throw new Error(
+        `service check batch returned invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  return toScheduledCheckBatchServiceResult(parsedBody);
+}
+
 type CachedMonitorHttpJson = {
   http_headers_json: string | null;
   expected_status_json: string | null;
@@ -141,7 +308,7 @@ const cachedMonitorHttpJsonById = new Map<number, CachedMonitorHttpJson>();
 let httpCheckModulePromise: Promise<typeof import('../monitor/http')> | null = null;
 let tcpCheckModulePromise: Promise<typeof import('../monitor/tcp')> | null = null;
 
-type DueMonitorRow = {
+export type DueMonitorRow = {
   id: number;
   name: string;
   type: string;
@@ -261,7 +428,7 @@ const PERSIST_STATEMENTS_SQL = {
   `,
 } as const;
 
-type CompletedDueMonitor = {
+export type CompletedDueMonitor = {
   row: DueMonitorRow;
   checkedAt: number;
   prevStatus: MonitorStatus | null;
@@ -310,6 +477,54 @@ async function listDueMonitors(db: D1Database, checkedAt: number): Promise<DueMo
   }
 
   const { results } = await statement.bind(checkedAt).all<DueMonitorRow>();
+
+  return results ?? [];
+}
+
+export async function listMonitorRowsByIds(
+  db: D1Database,
+  ids: number[],
+): Promise<DueMonitorRow[]> {
+  const uniqueIds = [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))];
+  if (uniqueIds.length === 0) {
+    return [];
+  }
+
+  const placeholders = uniqueIds.map((_, index) => `?${index + 1}`).join(', ');
+  const { results } = await db
+    .prepare(
+      `
+      SELECT
+        m.id,
+        m.name,
+        m.type,
+        m.target,
+        m.interval_sec,
+        m.created_at,
+        m.timeout_ms,
+        m.http_method,
+        m.http_headers_json,
+        m.http_body,
+        m.expected_status_json,
+        m.response_keyword,
+        m.response_keyword_mode,
+        m.response_forbidden_keyword,
+        m.response_forbidden_keyword_mode,
+        s.status AS state_status,
+        s.last_error AS state_last_error,
+        s.last_changed_at,
+        s.consecutive_failures,
+        s.consecutive_successes
+      FROM monitors m
+      LEFT JOIN monitor_state s ON s.monitor_id = m.id
+      WHERE m.is_active = 1
+        AND (s.status IS NULL OR s.status != 'paused')
+        AND m.id IN (${placeholders})
+      ORDER BY m.id
+    `,
+    )
+    .bind(...uniqueIds)
+    .all<DueMonitorRow>();
 
   return results ?? [];
 }
@@ -478,6 +693,47 @@ function toMonitorRuntimeUpdate(completed: CompletedDueMonitor): MonitorRuntimeU
   };
 }
 
+function summarizeCompletedMonitors(
+  completed: CompletedDueMonitor[],
+  rejectedCount: number,
+): MonitorBatchStats {
+  let httpCount = 0;
+  let tcpCount = 0;
+  let assertionCount = 0;
+  let attemptTotal = 0;
+  let downCount = 0;
+  let unknownCount = 0;
+
+  for (const monitor of completed) {
+    attemptTotal += monitor.outcome.attempts;
+    if (monitor.outcome.status === 'down') {
+      downCount += 1;
+    } else if (monitor.outcome.status === 'unknown') {
+      unknownCount += 1;
+    }
+
+    if (monitor.row.type === 'http') {
+      httpCount += 1;
+      if (monitor.row.response_keyword || monitor.row.response_forbidden_keyword) {
+        assertionCount += 1;
+      }
+    } else if (monitor.row.type === 'tcp') {
+      tcpCount += 1;
+    }
+  }
+
+  return {
+    processedCount: completed.length,
+    rejectedCount,
+    attemptTotal,
+    httpCount,
+    tcpCount,
+    assertionCount,
+    downCount,
+    unknownCount,
+  };
+}
+
 async function runDueMonitor(
   row: DueMonitorRow,
   checkedAt: number,
@@ -628,6 +884,88 @@ async function persistCompletedMonitors(
   }
 }
 
+export async function runPersistedMonitorBatch(opts: {
+  db: D1Database;
+  rows: DueMonitorRow[];
+  checkedAt: number;
+  suppressedMonitorIds?: ReadonlySet<number>;
+  stateMachineConfig: {
+    failuresToDownFromUp: number;
+    successesToUpFromDown: number;
+  };
+  onPersistedMonitor?: (completed: CompletedDueMonitor) => void;
+}): Promise<MonitorBatchExecutionResult> {
+  const limit = pLimit(CHECK_CONCURRENCY);
+  const suppressedMonitorIds = opts.suppressedMonitorIds ?? new Set<number>();
+  const checksStart = performance.now();
+  const settled = await Promise.allSettled(
+    opts.rows.map((row) =>
+      limit(() =>
+        runDueMonitor(
+          row,
+          opts.checkedAt,
+          suppressedMonitorIds.has(row.id),
+          opts.stateMachineConfig,
+        ),
+      ),
+    ),
+  );
+  const checksDurMs = performance.now() - checksStart;
+
+  const rejectedCount = settled.filter((result) => result.status === 'rejected').length;
+  const completed = settled
+    .filter((result): result is PromiseFulfilledResult<CompletedDueMonitor> => result.status === 'fulfilled')
+    .map((result) => result.value);
+
+  let persistDurMs = 0;
+  if (completed.length > 0) {
+    const persistStart = performance.now();
+    await persistCompletedMonitors(opts.db, completed);
+    persistDurMs = performance.now() - persistStart;
+
+    if (opts.onPersistedMonitor) {
+      for (const monitor of completed) {
+        opts.onPersistedMonitor(monitor);
+      }
+    }
+  }
+
+  const runtimeUpdates = completed
+    .map(toMonitorRuntimeUpdate)
+    .sort((left, right) => left.monitor_id - right.monitor_id);
+
+  return {
+    runtimeUpdates,
+    stats: summarizeCompletedMonitors(completed, rejectedCount),
+    checksDurMs,
+    persistDurMs,
+  };
+}
+
+function mergeBatchStats(target: MonitorBatchStats, source: MonitorBatchStats): void {
+  target.processedCount += source.processedCount;
+  target.rejectedCount += source.rejectedCount;
+  target.attemptTotal += source.attemptTotal;
+  target.httpCount += source.httpCount;
+  target.tcpCount += source.tcpCount;
+  target.assertionCount += source.assertionCount;
+  target.downCount += source.downCount;
+  target.unknownCount += source.unknownCount;
+}
+
+function chunkDueMonitorRows(rows: DueMonitorRow[], size: number): DueMonitorRow[][] {
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const chunkSize = Math.max(1, Math.floor(size));
+  const chunks: DueMonitorRow[][] = [];
+  for (let index = 0; index < rows.length; index += chunkSize) {
+    chunks.push(rows.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
 export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
   const checkedAt = Math.floor(now / 60) * 60;
@@ -687,27 +1025,91 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
       ? new Set<number>()
       : await notificationsModule.listMaintenanceSuppressedMonitorIds(env.DB, now, dueMonitorIds);
 
-  const limit = pLimit(CHECK_CONCURRENCY);
-  const checksStart = performance.now();
-  const settled = await Promise.allSettled(
-    due.map((m) =>
-      limit(() => runDueMonitor(m, checkedAt, suppressedMonitorIds.has(m.id), stateMachineConfig)),
-    ),
-  );
-  const checksDurMs = performance.now() - checksStart;
+  const serviceBatchRows =
+    env.SELF && due.length > INTERNAL_SCHEDULED_BATCH_SIZE
+      ? chunkDueMonitorRows(due, INTERNAL_SCHEDULED_BATCH_SIZE)
+      : null;
 
-  const rejected = settled.filter((r) => r.status === 'rejected');
-  const completed = settled
-    .filter((r): r is PromiseFulfilledResult<CompletedDueMonitor> => r.status === 'fulfilled')
-    .map((r) => r.value);
-  const runtimeUpdates = completed.map(toMonitorRuntimeUpdate);
+  const inlineNotificationHandler =
+    notificationsModule && notify
+      ? (completed: CompletedDueMonitor) =>
+          notificationsModule?.queueMonitorNotification(env, notify, completed)
+      : undefined;
+
+  let checksDurMs = 0;
   let persistDurMs = 0;
+  let batchWallDurMs = 0;
   let runtimeSnapshotDurMs = 0;
+  let runtimeUpdates: MonitorRuntimeUpdate[] = [];
+  const aggregateStats: MonitorBatchStats = {
+    processedCount: 0,
+    rejectedCount: 0,
+    attemptTotal: 0,
+    httpCount: 0,
+    tcpCount: 0,
+    assertionCount: 0,
+    downCount: 0,
+    unknownCount: 0,
+  };
 
-  if (completed.length > 0) {
-    const persistStart = performance.now();
-    await persistCompletedMonitors(env.DB, completed);
-    persistDurMs = performance.now() - persistStart;
+  if (serviceBatchRows) {
+    const batchesStart = performance.now();
+    const batchResults = await Promise.all(
+      serviceBatchRows.map(async (rows) => {
+        const ids = rows.map((row) => row.id);
+        const suppressedIds = ids.filter((id) => suppressedMonitorIds.has(id));
+        try {
+          return await runScheduledCheckBatchViaService(env, {
+            ids,
+            checkedAt,
+            suppressedMonitorIds: suppressedIds,
+            stateMachineConfig,
+            allowNotifications: Boolean(notificationsModule),
+          });
+        } catch (err) {
+          console.warn('scheduled: service batch failed, falling back inline', err);
+          return await runPersistedMonitorBatch({
+            db: env.DB,
+            rows,
+            checkedAt,
+            suppressedMonitorIds,
+            stateMachineConfig,
+            ...(inlineNotificationHandler
+              ? { onPersistedMonitor: inlineNotificationHandler }
+              : {}),
+          });
+        }
+      }),
+    );
+    batchWallDurMs = performance.now() - batchesStart;
+
+    for (const batch of batchResults) {
+      runtimeUpdates.push(...batch.runtimeUpdates);
+      checksDurMs += batch.checksDurMs;
+      persistDurMs += batch.persistDurMs;
+      mergeBatchStats(aggregateStats, batch.stats);
+    }
+  } else {
+    const batch = await runPersistedMonitorBatch({
+      db: env.DB,
+      rows: due,
+      checkedAt,
+      suppressedMonitorIds,
+      stateMachineConfig,
+      ...(inlineNotificationHandler
+        ? { onPersistedMonitor: inlineNotificationHandler }
+        : {}),
+    });
+    batchWallDurMs = batch.checksDurMs + batch.persistDurMs;
+    runtimeUpdates = batch.runtimeUpdates;
+    checksDurMs = batch.checksDurMs;
+    persistDurMs = batch.persistDurMs;
+    mergeBatchStats(aggregateStats, batch.stats);
+  }
+
+  runtimeUpdates = runtimeUpdates.sort((left, right) => left.monitor_id - right.monitor_id);
+
+  if (runtimeUpdates.length > 0) {
     const runtimeSnapshotStart = performance.now();
     await refreshPublicMonitorRuntimeSnapshot({
       db: env.DB,
@@ -716,43 +1118,18 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
       rebuild: async () => await rebuildPublicMonitorRuntimeSnapshot(env.DB, now),
     });
     runtimeSnapshotDurMs = performance.now() - runtimeSnapshotStart;
-
-    if (notificationsModule) {
-      for (const monitor of completed) {
-        notificationsModule.queueMonitorNotification(env, notify, monitor);
-      }
-    }
   }
 
-  let httpCount = 0;
-  let tcpCount = 0;
-  let assertionCount = 0;
-  let attemptTotal = 0;
-  let downCount = 0;
-  let unknownCount = 0;
-  for (const monitor of completed) {
-    attemptTotal += monitor.outcome.attempts;
-    if (monitor.outcome.status === 'down') downCount += 1;
-    else if (monitor.outcome.status === 'unknown') unknownCount += 1;
+  const batchMode = serviceBatchRows ? 'service' : 'inline';
+  const batchCount = serviceBatchRows?.length ?? 1;
 
-    if (monitor.row.type === 'http') {
-      httpCount += 1;
-      if (monitor.row.response_keyword || monitor.row.response_forbidden_keyword) {
-        assertionCount += 1;
-      }
-    } else if (monitor.row.type === 'tcp') {
-      tcpCount += 1;
-    }
-  }
-
-  if (rejected.length > 0) {
+  if (aggregateStats.rejectedCount > 0) {
     console.error(
-      `scheduled: ${rejected.length}/${settled.length} monitors failed at ${checkedAt} attempts=${attemptTotal} http=${httpCount} tcp=${tcpCount} assertions=${assertionCount} down=${downCount} unknown=${unknownCount} dur_setup=${setupDurMs.toFixed(2)} dur_checks=${checksDurMs.toFixed(2)} dur_persist=${persistDurMs.toFixed(2)} dur_runtime=${runtimeSnapshotDurMs.toFixed(2)} dur_total=${(performance.now() - totalStart).toFixed(2)}`,
-      rejected[0],
+      `scheduled: ${aggregateStats.rejectedCount}/${due.length} monitors failed at ${checkedAt} attempts=${aggregateStats.attemptTotal} http=${aggregateStats.httpCount} tcp=${aggregateStats.tcpCount} assertions=${aggregateStats.assertionCount} down=${aggregateStats.downCount} unknown=${aggregateStats.unknownCount} batch_mode=${batchMode} batch_count=${batchCount} dur_setup=${setupDurMs.toFixed(2)} dur_checks=${checksDurMs.toFixed(2)} dur_persist=${persistDurMs.toFixed(2)} dur_batch=${batchWallDurMs.toFixed(2)} dur_runtime=${runtimeSnapshotDurMs.toFixed(2)} dur_total=${(performance.now() - totalStart).toFixed(2)}`,
     );
   } else {
     console.log(
-      `scheduled: processed ${settled.length} monitors at ${checkedAt} attempts=${attemptTotal} http=${httpCount} tcp=${tcpCount} assertions=${assertionCount} down=${downCount} unknown=${unknownCount} dur_setup=${setupDurMs.toFixed(2)} dur_checks=${checksDurMs.toFixed(2)} dur_persist=${persistDurMs.toFixed(2)} dur_runtime=${runtimeSnapshotDurMs.toFixed(2)} dur_total=${(performance.now() - totalStart).toFixed(2)}`,
+      `scheduled: processed ${aggregateStats.processedCount} monitors at ${checkedAt} attempts=${aggregateStats.attemptTotal} http=${aggregateStats.httpCount} tcp=${aggregateStats.tcpCount} assertions=${aggregateStats.assertionCount} down=${aggregateStats.downCount} unknown=${aggregateStats.unknownCount} batch_mode=${batchMode} batch_count=${batchCount} dur_setup=${setupDurMs.toFixed(2)} dur_checks=${checksDurMs.toFixed(2)} dur_persist=${persistDurMs.toFixed(2)} dur_batch=${batchWallDurMs.toFixed(2)} dur_runtime=${runtimeSnapshotDurMs.toFixed(2)} dur_total=${(performance.now() - totalStart).toFixed(2)}`,
     );
   }
 

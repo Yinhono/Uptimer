@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import type { Env } from './env';
 import type { Trace } from './observability/trace';
+import type { CompletedDueMonitor } from './scheduler/scheduled';
 
 const HOMEPAGE_REFRESH_LOCK_NAME = 'snapshot:homepage:refresh';
 const HOMEPAGE_REFRESH_LOCK_LEASE_SECONDS = 55;
@@ -34,6 +35,16 @@ const internalRefreshJsonBodySchema = z.object({
   token: z.string(),
   trust_base_snapshot_monitor_metadata: z.boolean().optional(),
   runtime_updates: z.array(z.unknown()).optional(),
+});
+
+const internalScheduledCheckBatchJsonBodySchema = z.object({
+  token: z.string(),
+  ids: z.array(z.number().int().positive()).min(1),
+  checked_at: z.number().int().nonnegative(),
+  suppressed_monitor_ids: z.array(z.number().int().positive()).optional(),
+  state_failures_to_down_from_up: z.number().int().min(1).max(10),
+  state_successes_to_up_from_down: z.number().int().min(1).max(10),
+  allow_notifications: z.boolean().optional(),
 });
 
 function finalizeInternalRefreshResponse(
@@ -251,11 +262,13 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
             baseSnapshotBodyJson: baseSnapshot.bodyJson,
             trustBaseSnapshotMonitorMetadata,
           });
-    const payload = trace
-      ? trace.time('homepage_refresh_validate', () =>
-          snapshotMod.toHomepageSnapshotPayload(computed),
-        )
-      : snapshotMod.toHomepageSnapshotPayload(computed);
+    const payload = patched
+      ? patched
+      : trace
+        ? trace.time('homepage_refresh_validate', () =>
+            snapshotMod.toHomepageSnapshotPayload(computed),
+          )
+        : snapshotMod.toHomepageSnapshotPayload(computed);
     if (trace) {
       await trace.timeAsync(
         'homepage_refresh_write',
@@ -295,11 +308,96 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
   }
 }
 
+async function handleInternalScheduledCheckBatch(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  if (request.method !== 'POST') {
+    return new Response('Method Not Allowed', { status: 405 });
+  }
+
+  const parsedBody = internalScheduledCheckBatchJsonBodySchema.safeParse(
+    await request.json().catch(() => null),
+  );
+  if (!parsedBody.success) {
+    return new Response('Forbidden', { status: 403 });
+  }
+
+  const token = parsedBody.data.token.trim();
+  if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
+    return new Response('Forbidden', { status: 403 });
+  }
+
+  const ids = [...new Set(parsedBody.data.ids)];
+  const suppressedMonitorIds = new Set(parsedBody.data.suppressed_monitor_ids ?? []);
+  const [{ listMonitorRowsByIds, runPersistedMonitorBatch }, notificationsModule] =
+    await Promise.all([
+      import('./scheduler/scheduled'),
+      parsedBody.data.allow_notifications === true
+        ? import('./scheduler/notifications')
+        : Promise.resolve(null),
+    ]);
+
+  const fetchedRows = await listMonitorRowsByIds(env.DB, ids);
+  const rowById = new Map(fetchedRows.map((row) => [row.id, row]));
+  const rows = ids
+    .map((id) => rowById.get(id) ?? null)
+    .filter((row): row is NonNullable<typeof row> => row !== null);
+
+  const notify = notificationsModule
+    ? await notificationsModule.createNotifyContext(env, ctx)
+    : null;
+  const result = await runPersistedMonitorBatch({
+    db: env.DB,
+    rows,
+    checkedAt: parsedBody.data.checked_at,
+    suppressedMonitorIds,
+    stateMachineConfig: {
+      failuresToDownFromUp: parsedBody.data.state_failures_to_down_from_up,
+      successesToUpFromDown: parsedBody.data.state_successes_to_up_from_down,
+    },
+    ...(notificationsModule && notify
+      ? {
+          onPersistedMonitor: (completed: CompletedDueMonitor) =>
+            notificationsModule.queueMonitorNotification(env, notify, completed),
+        }
+      : {}),
+  });
+
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      runtime_updates: result.runtimeUpdates,
+      processed_count: result.stats.processedCount,
+      rejected_count: result.stats.rejectedCount,
+      attempt_total: result.stats.attemptTotal,
+      http_count: result.stats.httpCount,
+      tcp_count: result.stats.tcpCount,
+      assertion_count: result.stats.assertionCount,
+      down_count: result.stats.downCount,
+      unknown_count: result.stats.unknownCount,
+      checks_duration_ms: result.checksDurMs,
+      persist_duration_ms: result.persistDurMs,
+    }),
+    {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      },
+    },
+  );
+}
+
 export default {
   fetch: async (request: Request, env: Env, ctx: ExecutionContext): Promise<Response> => {
     const url = new URL(request.url);
     if (url.pathname === '/api/v1/internal/refresh/homepage') {
       return handleInternalHomepageRefresh(request, env);
+    }
+    if (url.pathname === '/api/v1/internal/scheduled/check-batch') {
+      return handleInternalScheduledCheckBatch(request, env, ctx);
     }
 
     const mod = await import('./fetch-handler');

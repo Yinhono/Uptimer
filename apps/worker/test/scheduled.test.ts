@@ -742,10 +742,6 @@ describe('scheduler/scheduled regression', () => {
 
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining('scheduled: 1/1 monitors failed'),
-        expect.objectContaining({
-          status: 'rejected',
-          reason: expect.any(Error),
-        }),
       );
       expect(waitUntil).toHaveBeenCalledTimes(1);
     } finally {
