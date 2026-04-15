@@ -84,6 +84,15 @@ function samplePayload(now = 1_728_000_000) {
   };
 }
 
+function expandHomepageSnapshotWriteArgs(args: unknown[]): unknown[][] {
+  return args.length === 8
+    ? [
+        args.slice(0, 4),
+        args.slice(4, 8),
+      ]
+    : [args];
+}
+
 describe('snapshots/public-homepage', () => {
   afterEach(() => {
     vi.clearAllMocks();
@@ -223,7 +232,7 @@ describe('snapshots/public-homepage', () => {
       {
         match: 'insert into public_snapshots',
         run: (args) => {
-          boundArgs.push(args);
+          boundArgs.push(...expandHomepageSnapshotWriteArgs(args));
           return { meta: { changes: 1 } };
         },
       },
@@ -246,14 +255,21 @@ describe('snapshots/public-homepage', () => {
       {
         match: 'insert into public_snapshots',
         run: (args) => {
-          const [key, generatedAt, bodyJson, updatedAt] = args as [string, number, string, number];
-          const existing = rows.get(key);
-          if (!existing || generatedAt >= existing.generated_at) {
-            rows.set(key, {
-              generated_at: generatedAt,
-              body_json: bodyJson,
-              updated_at: updatedAt,
-            });
+          for (const expandedArgs of expandHomepageSnapshotWriteArgs(args)) {
+            const [key, generatedAt, bodyJson, updatedAt] = expandedArgs as [
+              string,
+              number,
+              string,
+              number,
+            ];
+            const existing = rows.get(key);
+            if (!existing || generatedAt >= existing.generated_at) {
+              rows.set(key, {
+                generated_at: generatedAt,
+                body_json: bodyJson,
+                updated_at: updatedAt,
+              });
+            }
           }
           return { meta: { changes: 1 } };
         },
@@ -278,7 +294,7 @@ describe('snapshots/public-homepage', () => {
       {
         match: 'insert into public_snapshots',
         run: (args) => {
-          boundArgs.push(args);
+          boundArgs.push(...expandHomepageSnapshotWriteArgs(args));
           return { meta: { changes: 1 } };
         },
       },
@@ -392,7 +408,7 @@ describe('snapshots/public-homepage', () => {
       {
         match: 'insert into public_snapshots',
         run: (args) => {
-          writtenArgs.push(args);
+          writtenArgs.push(...expandHomepageSnapshotWriteArgs(args));
           return { meta: { changes: 1 } };
         },
       },
@@ -428,7 +444,7 @@ describe('snapshots/public-homepage', () => {
       {
         match: 'insert into public_snapshots',
         run: (args) => {
-          writtenArgs.push(args);
+          writtenArgs.push(...expandHomepageSnapshotWriteArgs(args));
           return { meta: { changes: 1 } };
         },
       },

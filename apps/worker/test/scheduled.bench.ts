@@ -209,6 +209,8 @@ function createEnvForScenario(scenario: Scenario): {
       run: (args) => {
         if (args[0] === 'homepage:artifact') {
           homepageArtifactGeneratedAt = Number(args[1]);
+        } else if (args[4] === 'homepage:artifact') {
+          homepageArtifactGeneratedAt = Number(args[5]);
         }
         return { meta: { changes: 1 } };
       },
