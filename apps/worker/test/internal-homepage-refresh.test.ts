@@ -181,7 +181,7 @@ describe('internal homepage refresh route', () => {
     expect(res.status).toBe(200);
     expect(tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates).toHaveBeenCalledTimes(1);
     expect(computePublicHomepagePayload).not.toHaveBeenCalled();
-    expect(writeHomepageSnapshot).toHaveBeenCalledWith(env.DB, now, fastPayload, undefined, false);
+    expect(writeHomepageSnapshot).toHaveBeenCalledWith(env.DB, now, fastPayload, undefined, true);
   });
 
   it('falls back to full compute when the scheduled runtime fast path misses', async () => {
