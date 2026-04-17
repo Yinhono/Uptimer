@@ -18,9 +18,9 @@ import {
   MONITOR_RUNTIME_MAX_AGE_SECONDS,
   MONITOR_RUNTIME_SNAPSHOT_KEY,
   parsePublicMonitorRuntimeEntryJson,
-  readPublicMonitorRuntimeSnapshot,
-  snapshotHasMonitorIds,
-  toMonitorRuntimeEntryMap,
+  readPublicMonitorRuntimeTotalsSnapshot,
+  totalsSnapshotHasMonitorIds,
+  toMonitorRuntimeTotalsEntryMap,
 } from '../public/monitor-runtime';
 import {
   buildNumberedPlaceholders,
@@ -1428,15 +1428,15 @@ publicUiRoutes.get('/analytics/uptime', async (c) => {
     monitorIds.length > 0
       ? await trace.timeAsync(
           'runtime_snapshot',
-          async () => await readPublicMonitorRuntimeSnapshot(c.env.DB, rangeEnd),
+          async () => await readPublicMonitorRuntimeTotalsSnapshot(c.env.DB, rangeEnd),
         )
       : null;
-  if (monitorIds.length > 0 && (!runtimeSnapshot || !snapshotHasMonitorIds(runtimeSnapshot, monitorIds))) {
+  if (monitorIds.length > 0 && (!runtimeSnapshot || !totalsSnapshotHasMonitorIds(runtimeSnapshot, monitorIds))) {
     const { publicRoutes } = await import('./public');
     return publicRoutes.fetch(c.req.raw, c.env, c.executionCtx);
   }
 
-  const runtimeByMonitorId = runtimeSnapshot ? toMonitorRuntimeEntryMap(runtimeSnapshot) : null;
+  const runtimeByMonitorId = runtimeSnapshot ? toMonitorRuntimeTotalsEntryMap(runtimeSnapshot) : null;
   let total_sec = 0;
   let downtime_sec = 0;
   let unknown_sec = 0;

@@ -40,11 +40,33 @@ export type PublicMonitorRuntimeEntry = {
   heartbeat_status_codes: string;
 };
 
+export type PublicMonitorRuntimeTotalsEntry = Pick<
+  PublicMonitorRuntimeEntry,
+  | 'monitor_id'
+  | 'interval_sec'
+  | 'range_start_at'
+  | 'materialized_at'
+  | 'last_checked_at'
+  | 'last_status_code'
+  | 'last_outage_open'
+  | 'total_sec'
+  | 'downtime_sec'
+  | 'unknown_sec'
+  | 'uptime_sec'
+>;
+
 export type PublicMonitorRuntimeSnapshot = {
   version: 1;
   generated_at: number;
   day_start_at: number;
   monitors: PublicMonitorRuntimeEntry[];
+};
+
+export type PublicMonitorRuntimeTotalsSnapshot = {
+  version: 1;
+  generated_at: number;
+  day_start_at: number;
+  monitors: PublicMonitorRuntimeTotalsEntry[];
 };
 
 export type MonitorRuntimeHeartbeat = {
@@ -372,6 +394,20 @@ export function parsePublicMonitorRuntimeEntry(value: unknown): PublicMonitorRun
   return parsed.success ? parsed.data : null;
 }
 
+const runtimeTotalsEntrySchema = z.object({
+  monitor_id: z.number().int().positive(),
+  interval_sec: z.number().int().positive(),
+  range_start_at: z.number().int().nonnegative().nullable(),
+  materialized_at: z.number().int().nonnegative(),
+  last_checked_at: z.number().int().nonnegative().nullable(),
+  last_status_code: z.enum(['u', 'd', 'm', 'p', 'x']),
+  last_outage_open: z.boolean(),
+  total_sec: z.number().int().nonnegative(),
+  downtime_sec: z.number().int().nonnegative(),
+  unknown_sec: z.number().int().nonnegative(),
+  uptime_sec: z.number().int().nonnegative(),
+});
+
 const MAX_CACHED_RUNTIME_ENTRY_JSON_TEXTS = 512;
 const runtimeEntryByJsonText = new Map<string, PublicMonitorRuntimeEntry | null>();
 
@@ -419,22 +455,39 @@ export const publicMonitorRuntimeSnapshotSchema = z.object({
   monitors: z.array(runtimeEntrySchema),
 });
 
+export const publicMonitorRuntimeTotalsSnapshotSchema = z.object({
+  version: z.literal(MONITOR_RUNTIME_SNAPSHOT_VERSION),
+  generated_at: z.number().int().nonnegative(),
+  day_start_at: z.number().int().nonnegative(),
+  monitors: z.array(runtimeTotalsEntrySchema),
+});
+
 const readRuntimeSnapshotStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const upsertRuntimeSnapshotStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const runtimeSnapshotCacheByDb = new WeakMap<D1Database, RuntimeSnapshotCacheEntry>();
+const runtimeTotalsSnapshotCacheByDb = new WeakMap<D1Database, RuntimeTotalsSnapshotCacheEntry>();
 const runtimeSnapshotMonitorIdsBySnapshot = new WeakMap<
   PublicMonitorRuntimeSnapshot,
+  ReadonlySet<number>
+>();
+const runtimeTotalsSnapshotMonitorIdsBySnapshot = new WeakMap<
+  PublicMonitorRuntimeTotalsSnapshot,
   ReadonlySet<number>
 >();
 const runtimeSnapshotEntryMapBySnapshot = new WeakMap<
   PublicMonitorRuntimeSnapshot,
   ReadonlyMap<number, PublicMonitorRuntimeEntry>
 >();
+const runtimeTotalsSnapshotEntryMapBySnapshot = new WeakMap<
+  PublicMonitorRuntimeTotalsSnapshot,
+  ReadonlyMap<number, PublicMonitorRuntimeTotalsEntry>
+>();
 const runtimeEntryHeartbeatsByEntry = new WeakMap<
   PublicMonitorRuntimeEntry,
   MonitorRuntimeHeartbeat[]
 >();
 let runtimeSnapshotCacheGlobal: RuntimeSnapshotCacheGlobalEntry | null = null;
+let runtimeTotalsSnapshotCacheGlobal: RuntimeTotalsSnapshotCacheGlobalEntry | null = null;
 
 type RuntimeSnapshotRow = {
   generated_at: number;
@@ -448,7 +501,17 @@ type RuntimeSnapshotCacheEntry = {
   snapshot: PublicMonitorRuntimeSnapshot;
 };
 
+type RuntimeTotalsSnapshotCacheEntry = {
+  generatedAt: number;
+  updatedAt: number;
+  snapshot: PublicMonitorRuntimeTotalsSnapshot;
+};
+
 type RuntimeSnapshotCacheGlobalEntry = RuntimeSnapshotCacheEntry & {
+  rawBodyJson: string;
+};
+
+type RuntimeTotalsSnapshotCacheGlobalEntry = RuntimeTotalsSnapshotCacheEntry & {
   rawBodyJson: string;
 };
 
@@ -562,6 +625,35 @@ function writeCachedRuntimeSnapshot(
   return snapshot;
 }
 
+function readCachedRuntimeTotalsSnapshot(
+  db: D1Database,
+  generatedAt: number,
+  updatedAt: number,
+): PublicMonitorRuntimeTotalsSnapshot | null {
+  const cached = runtimeTotalsSnapshotCacheByDb.get(db);
+  if (!cached) {
+    return null;
+  }
+
+  return cached.generatedAt === generatedAt && cached.updatedAt === updatedAt
+    ? cached.snapshot
+    : null;
+}
+
+function writeCachedRuntimeTotalsSnapshot(
+  db: D1Database,
+  generatedAt: number,
+  updatedAt: number,
+  snapshot: PublicMonitorRuntimeTotalsSnapshot,
+): PublicMonitorRuntimeTotalsSnapshot {
+  runtimeTotalsSnapshotCacheByDb.set(db, {
+    generatedAt,
+    updatedAt,
+    snapshot,
+  });
+  return snapshot;
+}
+
 function readCachedRuntimeSnapshotGlobal(
   generatedAt: number,
   updatedAt: number,
@@ -586,6 +678,38 @@ function writeCachedRuntimeSnapshotGlobal(
   snapshot: PublicMonitorRuntimeSnapshot,
 ): PublicMonitorRuntimeSnapshot {
   runtimeSnapshotCacheGlobal = {
+    generatedAt,
+    updatedAt,
+    rawBodyJson,
+    snapshot,
+  };
+  return snapshot;
+}
+
+function readCachedRuntimeTotalsSnapshotGlobal(
+  generatedAt: number,
+  updatedAt: number,
+  rawBodyJson: string,
+): PublicMonitorRuntimeTotalsSnapshot | null {
+  const cached = runtimeTotalsSnapshotCacheGlobal;
+  if (!cached) {
+    return null;
+  }
+
+  return cached.generatedAt === generatedAt &&
+    cached.updatedAt === updatedAt &&
+    cached.rawBodyJson === rawBodyJson
+    ? cached.snapshot
+    : null;
+}
+
+function writeCachedRuntimeTotalsSnapshotGlobal(
+  generatedAt: number,
+  updatedAt: number,
+  rawBodyJson: string,
+  snapshot: PublicMonitorRuntimeTotalsSnapshot,
+): PublicMonitorRuntimeTotalsSnapshot {
+  runtimeTotalsSnapshotCacheGlobal = {
     generatedAt,
     updatedAt,
     rawBodyJson,
@@ -623,6 +747,38 @@ function readSnapshotEntryMap(
     next.set(entry.monitor_id, entry);
   }
   runtimeSnapshotEntryMapBySnapshot.set(snapshot, next);
+  return next;
+}
+
+function readTotalsSnapshotMonitorIds(
+  snapshot: PublicMonitorRuntimeTotalsSnapshot,
+): ReadonlySet<number> {
+  const cached = runtimeTotalsSnapshotMonitorIdsBySnapshot.get(snapshot);
+  if (cached) {
+    return cached;
+  }
+
+  const next = new Set<number>();
+  for (const entry of snapshot.monitors) {
+    next.add(entry.monitor_id);
+  }
+  runtimeTotalsSnapshotMonitorIdsBySnapshot.set(snapshot, next);
+  return next;
+}
+
+function readTotalsSnapshotEntryMap(
+  snapshot: PublicMonitorRuntimeTotalsSnapshot,
+): ReadonlyMap<number, PublicMonitorRuntimeTotalsEntry> {
+  const cached = runtimeTotalsSnapshotEntryMapBySnapshot.get(snapshot);
+  if (cached) {
+    return cached;
+  }
+
+  const next = new Map<number, PublicMonitorRuntimeTotalsEntry>();
+  for (const entry of snapshot.monitors) {
+    next.set(entry.monitor_id, entry);
+  }
+  runtimeTotalsSnapshotEntryMapBySnapshot.set(snapshot, next);
   return next;
 }
 
@@ -681,12 +837,98 @@ async function readStoredMonitorRuntimeSnapshot(
   }
 }
 
+async function readStoredMonitorRuntimeTotalsSnapshot(
+  db: D1Database,
+): Promise<{ generatedAt: number; snapshot: PublicMonitorRuntimeTotalsSnapshot } | null> {
+  try {
+    const row = await readRuntimeSnapshotStatement(db)
+      .bind(MONITOR_RUNTIME_SNAPSHOT_KEY)
+      .first<RuntimeSnapshotRow>();
+    if (!row?.body_json) return null;
+
+    const updatedAt = toSnapshotUpdatedAt(row);
+    const cachedSnapshot = readCachedRuntimeTotalsSnapshot(db, row.generated_at, updatedAt);
+    if (cachedSnapshot) {
+      return {
+        generatedAt: row.generated_at,
+        snapshot: cachedSnapshot,
+      };
+    }
+
+    const globalCachedSnapshot = readCachedRuntimeTotalsSnapshotGlobal(
+      row.generated_at,
+      updatedAt,
+      row.body_json,
+    );
+    if (globalCachedSnapshot) {
+      return {
+        generatedAt: row.generated_at,
+        snapshot: writeCachedRuntimeTotalsSnapshot(
+          db,
+          row.generated_at,
+          updatedAt,
+          globalCachedSnapshot,
+        ),
+      };
+    }
+
+    const parsedJson = JSON.parse(row.body_json) as unknown;
+    const parsed = publicMonitorRuntimeTotalsSnapshotSchema.safeParse(parsedJson);
+    if (!parsed.success) {
+      console.warn('monitor runtime totals: invalid snapshot payload', parsed.error.message);
+      return null;
+    }
+
+    return {
+      generatedAt: row.generated_at,
+      snapshot: writeCachedRuntimeTotalsSnapshot(
+        db,
+        row.generated_at,
+        updatedAt,
+        writeCachedRuntimeTotalsSnapshotGlobal(
+          row.generated_at,
+          updatedAt,
+          row.body_json,
+          parsed.data,
+        ),
+      ),
+    };
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('No fake D1 first() handler matched SQL:')) {
+      return null;
+    }
+    console.warn('monitor runtime totals: read failed', err);
+    return null;
+  }
+}
+
 export async function readPublicMonitorRuntimeSnapshot(
   db: D1Database,
   now: number,
   maxAgeSeconds = MONITOR_RUNTIME_MAX_AGE_SECONDS,
 ): Promise<PublicMonitorRuntimeSnapshot | null> {
   const stored = await readStoredMonitorRuntimeSnapshot(db);
+  if (!stored) return null;
+
+  const age = Math.max(0, now - stored.generatedAt);
+  if (age > maxAgeSeconds) {
+    return null;
+  }
+
+  const dayStart = utcDayStart(now);
+  if (stored.snapshot.day_start_at !== dayStart) {
+    return null;
+  }
+
+  return stored.snapshot;
+}
+
+export async function readPublicMonitorRuntimeTotalsSnapshot(
+  db: D1Database,
+  now: number,
+  maxAgeSeconds = MONITOR_RUNTIME_MAX_AGE_SECONDS,
+): Promise<PublicMonitorRuntimeTotalsSnapshot | null> {
+  const stored = await readStoredMonitorRuntimeTotalsSnapshot(db);
   if (!stored) return null;
 
   const age = Math.max(0, now - stored.generatedAt);
@@ -735,6 +977,30 @@ export function toMonitorRuntimeEntryMap(
   snapshot: PublicMonitorRuntimeSnapshot,
 ): ReadonlyMap<number, PublicMonitorRuntimeEntry> {
   return readSnapshotEntryMap(snapshot);
+}
+
+export function totalsSnapshotHasMonitorIds(
+  snapshot: PublicMonitorRuntimeTotalsSnapshot,
+  monitorIds: number[],
+): boolean {
+  if (monitorIds.length === 0) return true;
+  if (monitorIds.length > snapshot.monitors.length) {
+    return false;
+  }
+
+  const seen = readTotalsSnapshotMonitorIds(snapshot);
+  for (const monitorId of monitorIds) {
+    if (!seen.has(monitorId)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function toMonitorRuntimeTotalsEntryMap(
+  snapshot: PublicMonitorRuntimeTotalsSnapshot,
+): ReadonlyMap<number, PublicMonitorRuntimeTotalsEntry> {
+  return readTotalsSnapshotEntryMap(snapshot);
 }
 
 function computeSegmentTotals(opts: {
@@ -935,7 +1201,7 @@ export function applyMonitorRuntimeUpdates(
 }
 
 export function materializeMonitorRuntimeTotals(
-  entry: PublicMonitorRuntimeEntry,
+  entry: PublicMonitorRuntimeTotalsEntry,
   now: number,
 ): MonitorRuntimeTotals {
   const total_sec = clampNonNegativeInteger(entry.total_sec);
