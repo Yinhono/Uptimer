@@ -5,7 +5,14 @@ import type { Env } from '../env';
 import { hasValidAdminTokenRequest } from '../middleware/auth';
 import { AppError } from '../middleware/errors';
 import { cachePublic } from '../middleware/cache-public';
-import { utcDayStart } from '../analytics/uptime';
+import {
+  buildUnknownIntervals,
+  mergeIntervals,
+  overlapSeconds,
+  rangeToSeconds,
+  sumIntervals,
+  utcDayStart,
+} from '../analytics/uptime';
 import {
   materializeMonitorRuntimeTotals,
   readPublicMonitorRuntimeSnapshot,
@@ -46,6 +53,7 @@ function withVisibilityAwareCaching(res: Response, includeHiddenMonitors: boolea
 }
 
 const latencyRangeSchema = z.enum(['24h']);
+const uptimeRangeSchema = z.enum(['24h', '7d', '30d']);
 const uptimeOverviewRangeSchema = z.enum(['30d', '90d']);
 
 type IncidentRow = {
@@ -339,6 +347,178 @@ function jsonArrayLiteral(value: string | null | undefined): string {
   if (typeof value !== 'string') return '[]';
   const trimmed = value.trim();
   return trimmed.startsWith('[') && trimmed.endsWith(']') ? trimmed : '[]';
+}
+
+function toCheckStatus(value: string | null): 'up' | 'down' | 'maintenance' | 'unknown' {
+  switch (value) {
+    case 'up':
+    case 'down':
+    case 'maintenance':
+    case 'unknown':
+      return value;
+    default:
+      return 'unknown';
+  }
+}
+
+function resolveUptimeRangeStart(
+  rangeStart: number,
+  rangeEnd: number,
+  monitorCreatedAt: number,
+  lastCheckedAt: number | null,
+  checks: Array<{ checked_at: number; status: string }>,
+): number | null {
+  const monitorRangeStart = Math.max(rangeStart, monitorCreatedAt);
+  if (rangeEnd <= monitorRangeStart) return null;
+
+  if (monitorRangeStart > rangeStart) {
+    const firstCheckAt = checks.find(
+      (check) => check.checked_at >= monitorRangeStart && check.checked_at < rangeEnd,
+    )?.checked_at;
+    if (firstCheckAt !== undefined) {
+      return firstCheckAt;
+    }
+
+    return lastCheckedAt === null ? null : monitorRangeStart;
+  }
+
+  return monitorRangeStart;
+}
+
+async function resolveUptimeRangeStartFromDb(opts: {
+  db: D1Database;
+  monitorId: number;
+  rangeStart: number;
+  rangeEnd: number;
+  monitorCreatedAt: number;
+  lastCheckedAt: number | null;
+}): Promise<number | null> {
+  const monitorRangeStart = Math.max(opts.rangeStart, opts.monitorCreatedAt);
+  if (opts.rangeEnd <= monitorRangeStart) return null;
+
+  if (monitorRangeStart > opts.rangeStart) {
+    const firstCheck = await opts.db
+      .prepare(
+        `
+          SELECT checked_at
+          FROM check_results
+          WHERE monitor_id = ?1
+            AND checked_at >= ?2
+            AND checked_at < ?3
+          ORDER BY checked_at
+          LIMIT 1
+        `,
+      )
+      .bind(opts.monitorId, monitorRangeStart, opts.rangeEnd)
+      .first<{ checked_at: number }>();
+
+    if (typeof firstCheck?.checked_at === 'number') {
+      return firstCheck.checked_at;
+    }
+
+    return opts.lastCheckedAt === null ? null : monitorRangeStart;
+  }
+
+  return monitorRangeStart;
+}
+
+function addUptimeTotals(
+  target: { total_sec: number; downtime_sec: number; unknown_sec: number; uptime_sec: number },
+  source: { total_sec: number; downtime_sec: number; unknown_sec: number; uptime_sec: number },
+): void {
+  target.total_sec += source.total_sec;
+  target.downtime_sec += source.downtime_sec;
+  target.unknown_sec += source.unknown_sec;
+  target.uptime_sec += source.uptime_sec;
+}
+
+async function computePartialUptimeTotals(
+  db: D1Database,
+  monitorId: number,
+  intervalSec: number,
+  createdAt: number,
+  lastCheckedAt: number | null,
+  rangeStart: number,
+  rangeEnd: number,
+): Promise<{ total_sec: number; downtime_sec: number; unknown_sec: number; uptime_sec: number }> {
+  if (rangeEnd <= rangeStart) {
+    return { total_sec: 0, downtime_sec: 0, unknown_sec: 0, uptime_sec: 0 };
+  }
+
+  const checksStart = rangeStart - intervalSec * 2;
+  const { results: checkRows } = await db
+    .prepare(
+      `
+        SELECT checked_at, status
+        FROM check_results
+        WHERE monitor_id = ?1
+          AND checked_at >= ?2
+          AND checked_at < ?3
+        ORDER BY checked_at
+      `,
+    )
+    .bind(monitorId, checksStart, rangeEnd)
+    .all<{ checked_at: number; status: string }>();
+
+  const checks = (checkRows ?? []).map((row) => ({
+    checked_at: row.checked_at,
+    status: toCheckStatus(row.status),
+  }));
+  const effectiveRangeStart = resolveUptimeRangeStart(
+    rangeStart,
+    rangeEnd,
+    createdAt,
+    lastCheckedAt,
+    checks,
+  );
+  if (effectiveRangeStart === null || rangeEnd <= effectiveRangeStart) {
+    return { total_sec: 0, downtime_sec: 0, unknown_sec: 0, uptime_sec: 0 };
+  }
+
+  const total_sec = rangeEnd - effectiveRangeStart;
+  const { results: outageRows } = await db
+    .prepare(
+      `
+        SELECT started_at, ended_at
+        FROM outages
+        WHERE monitor_id = ?1
+          AND started_at < ?2
+          AND (ended_at IS NULL OR ended_at > ?3)
+        ORDER BY started_at
+      `,
+    )
+    .bind(monitorId, rangeEnd, effectiveRangeStart)
+    .all<{ started_at: number; ended_at: number | null }>();
+
+  const downtimeIntervals = mergeIntervals(
+    (outageRows ?? [])
+      .map((row) => ({
+        start: Math.max(row.started_at, effectiveRangeStart),
+        end: Math.min(row.ended_at ?? rangeEnd, rangeEnd),
+      }))
+      .filter((interval) => interval.end > interval.start),
+  );
+  const downtime_sec = sumIntervals(downtimeIntervals);
+
+  const checksForUnknown =
+    effectiveRangeStart > rangeStart
+      ? checks.filter((check) => check.checked_at >= effectiveRangeStart)
+      : checks;
+  const unknownIntervals = buildUnknownIntervals(
+    effectiveRangeStart,
+    rangeEnd,
+    intervalSec,
+    checksForUnknown,
+  );
+  const unknown_sec = Math.max(
+    0,
+    sumIntervals(unknownIntervals) - overlapSeconds(unknownIntervals, downtimeIntervals),
+  );
+
+  const unavailable_sec = Math.min(total_sec, downtime_sec + unknown_sec);
+  const uptime_sec = Math.max(0, total_sec - unavailable_sec);
+
+  return { total_sec, downtime_sec, unknown_sec, uptime_sec };
 }
 
 async function buildCompactLatencyResponseJson(opts: {
@@ -948,6 +1128,178 @@ publicUiRoutes.get('/analytics/uptime', async (c) => {
         uptime_pct: total_sec === 0 ? 0 : (uptime_sec / total_sec) * 100,
       },
       monitors: output,
+    }),
+    includeHiddenMonitors,
+  );
+});
+
+publicUiRoutes.get('/monitors/:id/uptime', async (c) => {
+  const includeHiddenMonitors = isAuthorizedStatusAdminRequest(c);
+  const id = z.coerce.number().int().positive().parse(c.req.param('id'));
+  const range = uptimeRangeSchema.optional().default('24h').parse(c.req.query('range'));
+
+  const monitor = await c.env.DB
+    .prepare(
+      `
+        SELECT m.id, m.name, m.interval_sec, m.created_at, s.last_checked_at
+        FROM monitors m
+        LEFT JOIN monitor_state s ON s.monitor_id = m.id
+        WHERE m.id = ?1 AND m.is_active = 1
+          AND ${monitorVisibilityPredicate(includeHiddenMonitors, 'm')}
+      `,
+    )
+    .bind(id)
+    .first<{
+      id: number;
+      name: string;
+      interval_sec: number;
+      created_at: number;
+      last_checked_at: number | null;
+    }>();
+  if (!monitor) {
+    throw new AppError(404, 'NOT_FOUND', 'Monitor not found');
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const rangeEnd = Math.floor(now / 60) * 60;
+  const requestedRangeStart = rangeEnd - rangeToSeconds(range);
+  const rangeStart = Math.max(requestedRangeStart, monitor.created_at);
+  const effectiveRangeStart = await resolveUptimeRangeStartFromDb({
+    db: c.env.DB,
+    monitorId: id,
+    rangeStart,
+    rangeEnd,
+    monitorCreatedAt: monitor.created_at,
+    lastCheckedAt: monitor.last_checked_at,
+  });
+  const rangeStartAt = effectiveRangeStart ?? rangeStart;
+  if (effectiveRangeStart === null || rangeEnd <= effectiveRangeStart) {
+    return withVisibilityAwareCaching(
+      c.json({
+        monitor: { id: monitor.id, name: monitor.name },
+        range,
+        range_start_at: rangeStartAt,
+        range_end_at: rangeEnd,
+        total_sec: 0,
+        downtime_sec: 0,
+        unknown_sec: 0,
+        uptime_sec: 0,
+        uptime_pct: 0,
+      }),
+      includeHiddenMonitors,
+    );
+  }
+
+  const totals = {
+    total_sec: 0,
+    downtime_sec: 0,
+    unknown_sec: 0,
+    uptime_sec: 0,
+  };
+  const startDay = utcDayStart(effectiveRangeStart);
+  const endDay = utcDayStart(rangeEnd);
+
+  if (startDay === endDay) {
+    addUptimeTotals(
+      totals,
+      await computePartialUptimeTotals(
+        c.env.DB,
+        monitor.id,
+        monitor.interval_sec,
+        monitor.created_at,
+        monitor.last_checked_at,
+        effectiveRangeStart,
+        rangeEnd,
+      ),
+    );
+  } else {
+    const startPartialEnd = Math.min(rangeEnd, startDay + 86400);
+    if (effectiveRangeStart < startPartialEnd) {
+      addUptimeTotals(
+        totals,
+        await computePartialUptimeTotals(
+          c.env.DB,
+          monitor.id,
+          monitor.interval_sec,
+          monitor.created_at,
+          monitor.last_checked_at,
+          effectiveRangeStart,
+          startPartialEnd,
+        ),
+      );
+    }
+
+    const fullDaysStart = Math.max(startDay + 86400, effectiveRangeStart);
+    const fullDaysEnd = endDay;
+    if (fullDaysStart < fullDaysEnd) {
+      const rollup = await c.env.DB
+        .prepare(
+          `
+            SELECT
+              SUM(total_sec) AS total_sec,
+              SUM(downtime_sec) AS downtime_sec,
+              SUM(unknown_sec) AS unknown_sec,
+              SUM(uptime_sec) AS uptime_sec
+            FROM monitor_daily_rollups
+            WHERE monitor_id = ?1
+              AND day_start_at >= ?2
+              AND day_start_at < ?3
+          `,
+        )
+        .bind(monitor.id, fullDaysStart, fullDaysEnd)
+        .first<{
+          total_sec: number | null;
+          downtime_sec: number | null;
+          unknown_sec: number | null;
+          uptime_sec: number | null;
+        }>();
+
+      addUptimeTotals(totals, {
+        total_sec: rollup?.total_sec ?? 0,
+        downtime_sec: rollup?.downtime_sec ?? 0,
+        unknown_sec: rollup?.unknown_sec ?? 0,
+        uptime_sec: rollup?.uptime_sec ?? 0,
+      });
+    }
+
+    if (endDay < rangeEnd) {
+      const runtimeSnapshot = await readPublicMonitorRuntimeSnapshot(c.env.DB, rangeEnd);
+      const runtimeByMonitorId =
+        runtimeSnapshot && snapshotHasMonitorIds(runtimeSnapshot, [monitor.id])
+          ? toMonitorRuntimeEntryMap(runtimeSnapshot)
+          : null;
+      const runtimeEntry = runtimeByMonitorId?.get(monitor.id);
+
+      if (runtimeEntry) {
+        addUptimeTotals(totals, materializeMonitorRuntimeTotals(runtimeEntry, rangeEnd));
+      } else {
+        addUptimeTotals(
+          totals,
+          await computePartialUptimeTotals(
+            c.env.DB,
+            monitor.id,
+            monitor.interval_sec,
+            monitor.created_at,
+            monitor.last_checked_at,
+            endDay,
+            rangeEnd,
+          ),
+        );
+      }
+    }
+  }
+
+  return withVisibilityAwareCaching(
+    c.json({
+      monitor: { id: monitor.id, name: monitor.name },
+      range,
+      range_start_at: rangeStartAt,
+      range_end_at: rangeEnd,
+      total_sec: totals.total_sec,
+      downtime_sec: totals.downtime_sec,
+      unknown_sec: totals.unknown_sec,
+      uptime_sec: totals.uptime_sec,
+      uptime_pct: totals.total_sec === 0 ? 0 : (totals.uptime_sec / totals.total_sec) * 100,
     }),
     includeHiddenMonitors,
   );

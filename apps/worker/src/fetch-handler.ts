@@ -128,6 +128,7 @@ function isPublicUiPath(url: URL): boolean {
   if (pathname === '/api/v1/public/analytics/uptime') return true;
   if (/^\/api\/v1\/public\/monitors\/\d+\/day-context$/.test(pathname)) return true;
   if (/^\/api\/v1\/public\/monitors\/\d+\/outages$/.test(pathname)) return true;
+  if (/^\/api\/v1\/public\/monitors\/\d+\/uptime$/.test(pathname)) return true;
   return (
     /^\/api\/v1\/public\/monitors\/\d+\/latency$/.test(pathname) &&
     url.searchParams.get('format') === 'compact-v1'
