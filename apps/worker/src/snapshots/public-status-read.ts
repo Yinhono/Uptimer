@@ -1,4 +1,8 @@
-import { publicStatusResponseSchema, type PublicStatusResponse } from '../schemas/public-status';
+import {
+  publicStatusResponseSchema,
+  storedPublicStatusResponseSchema,
+  type PublicStatusResponse,
+} from '../schemas/public-status';
 
 const SNAPSHOT_KEY = 'status';
 const MAX_AGE_SECONDS = 60;
@@ -60,6 +64,11 @@ function parseJsonText(text: string): ParsedJsonText | null {
 }
 
 function normalizeStatusSnapshotPayload(value: unknown): PublicStatusResponse | null {
+  const stored = storedPublicStatusResponseSchema.safeParse(value);
+  if (stored.success) {
+    return stored.data;
+  }
+
   const parsed = publicStatusResponseSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
 }
@@ -178,6 +187,37 @@ export async function readStatusSnapshotJson(
   }
 }
 
+export async function readStatusSnapshotPayloadAnyAge(
+  db: D1Database,
+  now: number,
+  maxAgeSeconds = MAX_STALE_SECONDS,
+): Promise<{ data: PublicStatusResponse; bodyJson: string; age: number } | null> {
+  try {
+    const metadata = await readStatusSnapshotMetadataRow(db);
+    if (!metadata) return null;
+
+    const age = Math.max(0, now - metadata.generated_at);
+    if (age > maxAgeSeconds) return null;
+
+    const updatedAt = toSnapshotUpdatedAt(metadata);
+    const cached = readCachedStatusSnapshot(db, metadata.generated_at, updatedAt);
+    if (cached) {
+      return { data: cached.data, bodyJson: cached.bodyJson, age };
+    }
+
+    const row = await readStatusSnapshotRow(db);
+    if (!row || row.generated_at !== metadata.generated_at) return null;
+
+    const validated = validateStatusSnapshotBodyJson(row.body_json);
+    if (validated === null) return null;
+
+    const next = writeCachedStatusSnapshot(db, row.generated_at, updatedAt, validated);
+    return { data: next.data, bodyJson: next.bodyJson, age };
+  } catch {
+    return null;
+  }
+}
+
 export async function readStaleStatusSnapshotJson(
   db: D1Database,
   now: number,
@@ -218,4 +258,19 @@ export function applyStatusCacheHeaders(res: Response, ageSeconds: number): void
     'Cache-Control',
     `public, max-age=${maxAge}, stale-while-revalidate=${stale}, stale-if-error=${stale}`,
   );
+}
+
+export function primeStatusSnapshotCache(opts: {
+  db: D1Database;
+  generatedAt: number;
+  updatedAt: number;
+  bodyJson: string;
+  data: PublicStatusResponse;
+}): void {
+  normalizedStatusCacheByDb.set(opts.db, {
+    generatedAt: opts.generatedAt,
+    updatedAt: opts.updatedAt,
+    bodyJson: opts.bodyJson,
+    data: opts.data,
+  });
 }

@@ -2,6 +2,7 @@ import { AppError } from '../middleware/errors';
 import {
   publicHomepageResponseSchema,
   publicHomepageStoredRenderArtifactSchema,
+  storedPublicHomepageResponseSchema,
   type PublicHomepageResponse,
 } from '../schemas/public-homepage';
 
@@ -137,6 +138,11 @@ function normalizeDirectHomepagePayload(
 }
 
 function parseDirectHomepagePayload(value: unknown): PublicHomepageResponse | null {
+  const storedPayload = storedPublicHomepageResponseSchema.safeParse(value);
+  if (storedPayload.success) {
+    return storedPayload.data;
+  }
+
   const directPayload = publicHomepageResponseSchema.safeParse(value);
   if (directPayload.success) {
     return directPayload.data;

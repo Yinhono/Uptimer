@@ -8,9 +8,15 @@ vi.mock('../src/public/homepage', () => ({
   computePublicHomepagePayload: vi.fn(),
   tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates: vi.fn(),
 }));
+vi.mock('../src/public/status', () => ({
+  tryComputePublicStatusPayloadFromScheduledRuntimeUpdates: vi.fn(),
+}));
 vi.mock('../src/snapshots/public-homepage', () => ({
   toHomepageSnapshotPayload: vi.fn((value) => value),
   writeHomepageSnapshot: vi.fn(),
+}));
+vi.mock('../src/snapshots/public-status', () => ({
+  writeStatusSnapshot: vi.fn(),
 }));
 
 import type { Env } from '../src/env';
@@ -19,8 +25,10 @@ import {
   computePublicHomepagePayload,
   tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates,
 } from '../src/public/homepage';
+import { tryComputePublicStatusPayloadFromScheduledRuntimeUpdates } from '../src/public/status';
 import { acquireLease, releaseLease } from '../src/scheduler/lock';
 import { toHomepageSnapshotPayload, writeHomepageSnapshot } from '../src/snapshots/public-homepage';
+import { writeStatusSnapshot } from '../src/snapshots/public-status';
 import { createFakeD1Database } from './helpers/fake-d1';
 
 function createBaseSnapshot(now: number) {
@@ -104,6 +112,9 @@ describe('internal homepage refresh route', () => {
     vi.restoreAllMocks();
     vi.mocked(acquireLease).mockResolvedValue(true);
     vi.mocked(releaseLease).mockResolvedValue(undefined);
+    vi.mocked(tryComputePublicStatusPayloadFromScheduledRuntimeUpdates).mockResolvedValue(
+      null as never,
+    );
   });
 
   it('uses the scheduled runtime fast path when available', async () => {
@@ -152,6 +163,22 @@ describe('internal homepage refresh route', () => {
     expect(computePublicHomepagePayload).not.toHaveBeenCalled();
     expect(toHomepageSnapshotPayload).not.toHaveBeenCalled();
     expect(writeHomepageSnapshot).toHaveBeenCalledWith(env.DB, now, fastPayload, undefined, false);
+    expect(tryComputePublicStatusPayloadFromScheduledRuntimeUpdates).toHaveBeenCalledWith({
+      db: env.DB,
+      now,
+      updates: [
+        {
+          monitor_id: 1,
+          interval_sec: 60,
+          created_at: now - 300,
+          checked_at: now,
+          check_status: 'up',
+          next_status: 'up',
+          latency_ms: 55,
+        },
+      ],
+    });
+    expect(writeStatusSnapshot).not.toHaveBeenCalled();
     expect(releaseLease).toHaveBeenCalledWith(env.DB, 'snapshot:homepage:refresh', now + 55);
     expect(
       vi.mocked(tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates),
@@ -172,6 +199,70 @@ describe('internal homepage refresh route', () => {
         },
       ],
     });
+  });
+
+  it('writes a patched status snapshot when the scheduled fast path can produce one', async () => {
+    const now = 1_776_230_340;
+    vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+    const env = createEnv(now);
+    const baseSnapshot = createBaseSnapshot(now);
+    vi.mocked(tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates).mockResolvedValue(
+      {
+        ...baseSnapshot,
+        generated_at: now,
+      } as never,
+    );
+    const statusPayload = {
+      generated_at: now,
+      site_title: 'Status Hub',
+      site_description: 'Production services',
+      site_locale: 'en' as const,
+      site_timezone: 'UTC',
+      uptime_rating_level: 4 as const,
+      overall_status: 'up' as const,
+      banner: {
+        source: 'monitors' as const,
+        status: 'operational' as const,
+        title: 'All Systems Operational',
+        down_ratio: null,
+      },
+      summary: {
+        up: 1,
+        down: 0,
+        maintenance: 0,
+        paused: 0,
+        unknown: 0,
+      },
+      monitors: [],
+      active_incidents: [],
+      maintenance_windows: {
+        active: [],
+        upcoming: [],
+      },
+    };
+    vi.mocked(tryComputePublicStatusPayloadFromScheduledRuntimeUpdates).mockResolvedValue(
+      statusPayload as never,
+    );
+
+    const res = await worker.fetch(
+      new Request('https://status.example.com/api/v1/internal/refresh/homepage', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-admin-token',
+          'Content-Type': 'application/json; charset=utf-8',
+          'X-Uptimer-Refresh-Source': 'scheduled',
+        },
+        body: JSON.stringify({
+          token: 'test-admin-token',
+          runtime_updates: [[1, 60, now - 300, now, 'up', 'up', 55]],
+        }),
+      }),
+      env,
+      { waitUntil: vi.fn() } as unknown as ExecutionContext,
+    );
+
+    expect(res.status).toBe(200);
+    expect(writeStatusSnapshot).toHaveBeenCalledWith(env.DB, now, statusPayload);
   });
 
   it('normalizes privileged runtime update latency values before fast-path compute', async () => {

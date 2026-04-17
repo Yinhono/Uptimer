@@ -1,5 +1,6 @@
 import { AppError } from '../middleware/errors';
 import { publicStatusResponseSchema, type PublicStatusResponse } from '../schemas/public-status';
+import { primeStatusSnapshotCache } from './public-status-read';
 
 const SNAPSHOT_KEY = 'status';
 const MAX_AGE_SECONDS = 60;
@@ -137,6 +138,13 @@ export async function writeStatusSnapshot(
     upsertStatusStatementByDb.set(db, statement);
   }
 
+  primeStatusSnapshotCache({
+    db,
+    generatedAt: payload.generated_at,
+    updatedAt: now,
+    bodyJson,
+    data: payload,
+  });
   await statement.bind(SNAPSHOT_KEY, payload.generated_at, bodyJson, now).run();
 }
 

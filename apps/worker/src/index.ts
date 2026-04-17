@@ -352,7 +352,7 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
       );
     }
 
-    const [homepageMod, snapshotMod] = await Promise.all([
+    const [homepageMod, snapshotMod, statusMod, statusSnapshotMod] = await Promise.all([
       trace
         ? trace.timeAsync('import_homepage_module', async () => await import('./public/homepage'))
         : import('./public/homepage'),
@@ -362,6 +362,15 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
             async () => await import('./snapshots/public-homepage'),
           )
         : import('./snapshots/public-homepage'),
+      trace
+        ? trace.timeAsync('import_status_module', async () => await import('./public/status'))
+        : import('./public/status'),
+      trace
+        ? trace.timeAsync(
+            'import_status_snapshot_module',
+            async () => await import('./snapshots/public-status'),
+          )
+        : import('./snapshots/public-status'),
     ]);
     let payload =
       skipInitialFreshnessCheck && baseSnapshot.snapshot
@@ -429,6 +438,35 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
         undefined,
         baseSnapshot.seedDataSnapshot,
       );
+    }
+
+    const refreshedStatusPayload = trace
+      ? await trace.timeAsync(
+          'status_refresh_fast_compute',
+          async () =>
+            await statusMod.tryComputePublicStatusPayloadFromScheduledRuntimeUpdates({
+              db: env.DB,
+              now,
+              updates: runtimeUpdates ?? [],
+            }),
+        )
+      : await statusMod.tryComputePublicStatusPayloadFromScheduledRuntimeUpdates({
+          db: env.DB,
+          now,
+          updates: runtimeUpdates ?? [],
+        });
+    if (refreshedStatusPayload) {
+      if (trace) {
+        await trace.timeAsync(
+          'status_refresh_write',
+          async () => await statusSnapshotMod.writeStatusSnapshot(env.DB, now, refreshedStatusPayload),
+        );
+      } else {
+        await statusSnapshotMod.writeStatusSnapshot(env.DB, now, refreshedStatusPayload);
+      }
+      trace?.setLabel('status_refresh', 'patched');
+    } else {
+      trace?.setLabel('status_refresh', 'skipped');
     }
 
     return finalizeInternalRefreshResponse(
