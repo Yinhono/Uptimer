@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   applyMonitorRuntimeUpdates,
+  encodeMonitorRuntimeUpdatesCompact,
   materializeMonitorRuntimeTotals,
   monitorRuntimeUpdateSchema,
   parseMonitorRuntimeUpdate,
@@ -163,6 +164,36 @@ describe('public/monitor-runtime', () => {
       next_status: 'up',
       latency_ms: 0,
     });
+  });
+
+  it('parses compact runtime update tuples on the hot path', () => {
+    expect(
+      parseMonitorRuntimeUpdate([1, 60, 0, 60, 'up', 'up', -3.7]),
+    ).toEqual({
+      monitor_id: 1,
+      interval_sec: 60,
+      created_at: 0,
+      checked_at: 60,
+      check_status: 'up',
+      next_status: 'up',
+      latency_ms: 0,
+    });
+  });
+
+  it('encodes runtime updates into compact tuples for internal transport', () => {
+    expect(
+      encodeMonitorRuntimeUpdatesCompact([
+        {
+          monitor_id: 1,
+          interval_sec: 60,
+          created_at: 0,
+          checked_at: 60,
+          check_status: 'up',
+          next_status: 'down',
+          latency_ms: 12,
+        },
+      ]),
+    ).toEqual([[1, 60, 0, 60, 'up', 'down', 12]]);
   });
 
   it('rejects invalid runtime update arrays on the hot path', () => {

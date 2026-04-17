@@ -17,8 +17,9 @@ import {
 import type { CheckOutcome } from '../monitor/types';
 import { rebuildPublicMonitorRuntimeSnapshot } from '../public/monitor-runtime-bootstrap';
 import {
+  encodeMonitorRuntimeUpdatesCompact,
   normalizeRuntimeUpdateLatencyMs,
-  parseMonitorRuntimeUpdate,
+  parseMonitorRuntimeUpdates,
   refreshPublicMonitorRuntimeSnapshot,
   type MonitorRuntimeUpdate,
 } from '../public/monitor-runtime';
@@ -28,6 +29,7 @@ import type { NotifyContext } from './notifications';
 
 const LOCK_NAME = 'scheduler:tick';
 const LOCK_LEASE_SECONDS = 135;
+const INTERNAL_PROTOCOL_FORMAT = 'compact-v1';
 const INTERNAL_SCHEDULED_BATCH_SIZE = 6;
 const INTERNAL_SCHEDULED_BATCH_CONCURRENCY = 2;
 const HOMEPAGE_REFRESH_SERVICE_TIMEOUT_MS = 15_000;
@@ -170,6 +172,7 @@ async function refreshHomepageSnapshotViaService(
   const runtimeUpdates = opts.runtimeUpdates?.length ? opts.runtimeUpdates : undefined;
   const headers: Record<string, string> = {
     Authorization: `Bearer ${env.ADMIN_TOKEN}`,
+    'X-Uptimer-Internal-Format': INTERNAL_PROTOCOL_FORMAT,
     'Content-Type': runtimeUpdates
       ? 'application/json; charset=utf-8'
       : 'text/plain; charset=utf-8',
@@ -193,7 +196,7 @@ async function refreshHomepageSnapshotViaService(
       headers,
       body: runtimeUpdates
         ? JSON.stringify({
-            runtime_updates: runtimeUpdates,
+            runtime_updates: encodeMonitorRuntimeUpdatesCompact(runtimeUpdates),
           })
         : env.ADMIN_TOKEN,
     }),
@@ -243,17 +246,10 @@ function toScheduledCheckBatchServiceResult(value: unknown): ScheduledCheckBatch
   }
 
   const runtimeUpdatesValue = value.runtime_updates;
-  if (!Array.isArray(runtimeUpdatesValue)) {
-    throw new Error('service batch missing runtime_updates');
+  const runtimeUpdates = parseMonitorRuntimeUpdates(runtimeUpdatesValue);
+  if (!runtimeUpdates) {
+    throw new Error('service batch returned invalid runtime_updates');
   }
-
-  const runtimeUpdates: MonitorRuntimeUpdate[] = runtimeUpdatesValue.map((item, index) => {
-    const parsed = parseMonitorRuntimeUpdate(item);
-    if (!parsed) {
-      throw new Error(`service batch returned invalid runtime update at index ${index}`);
-    }
-    return parsed;
-  });
 
   const stats: MonitorBatchStats = {
     processedCount: Math.max(0, toInteger(value.processed_count) ?? runtimeUpdates.length),
@@ -288,6 +284,7 @@ async function runScheduledCheckBatchViaService(
       method: 'POST',
       headers: {
         Authorization: `Bearer ${env.ADMIN_TOKEN}`,
+        'X-Uptimer-Internal-Format': INTERNAL_PROTOCOL_FORMAT,
         'Content-Type': 'application/json; charset=utf-8',
       },
       body: JSON.stringify({

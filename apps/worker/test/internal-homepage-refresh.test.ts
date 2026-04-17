@@ -140,17 +140,7 @@ describe('internal homepage refresh route', () => {
         },
         body: JSON.stringify({
           token: 'test-admin-token',
-          runtime_updates: [
-            {
-              monitor_id: 1,
-              interval_sec: 60,
-              created_at: now - 300,
-              checked_at: now,
-              check_status: 'up',
-              next_status: 'up',
-              latency_ms: 55,
-            },
-          ],
+          runtime_updates: [[1, 60, now - 300, now, 'up', 'up', 55]],
         }),
       }),
       env,
@@ -207,17 +197,7 @@ describe('internal homepage refresh route', () => {
         },
         body: JSON.stringify({
           token: 'test-admin-token',
-          runtime_updates: [
-            {
-              monitor_id: 1,
-              interval_sec: 60,
-              created_at: now - 300,
-              checked_at: now,
-              check_status: 'up',
-              next_status: 'up',
-              latency_ms: -3.7,
-            },
-          ],
+          runtime_updates: [[1, 60, now - 300, now, 'up', 'up', -3.7]],
         }),
       }),
       env,

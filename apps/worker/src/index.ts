@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Env } from './env';
 import type { Trace } from './observability/trace';
 import {
+  encodeMonitorRuntimeUpdatesCompact,
   parseMonitorRuntimeUpdates,
   type MonitorRuntimeUpdate,
 } from './public/monitor-runtime';
@@ -11,6 +12,7 @@ import type { CompletedDueMonitor } from './scheduler/scheduled';
 const HOMEPAGE_REFRESH_LOCK_NAME = 'snapshot:homepage:refresh';
 const HOMEPAGE_REFRESH_LOCK_LEASE_SECONDS = 55;
 const INTERNAL_REQUEST_MAX_BYTES = 256 * 1024;
+const INTERNAL_PROTOCOL_FORMAT = 'compact-v1';
 
 function normalizeTruthyHeader(value: string | null): boolean {
   if (!value) return false;
@@ -42,6 +44,10 @@ function isRequestBodyTooLarge(request: Request): boolean {
 
 function isScheduledRefreshRequest(request: Request): boolean {
   return request.headers.get('X-Uptimer-Refresh-Source') === 'scheduled';
+}
+
+function wantsCompactInternalFormat(request: Request): boolean {
+  return request.headers.get('X-Uptimer-Internal-Format') === INTERNAL_PROTOCOL_FORMAT;
 }
 
 function isSameMinute(a: number, b: number): boolean {
@@ -520,7 +526,9 @@ async function handleInternalScheduledCheckBatch(
   return new Response(
     JSON.stringify({
       ok: true,
-      runtime_updates: result.runtimeUpdates,
+      runtime_updates: wantsCompactInternalFormat(request)
+        ? encodeMonitorRuntimeUpdatesCompact(result.runtimeUpdates)
+        : result.runtimeUpdates,
       processed_count: result.stats.processedCount,
       rejected_count: result.stats.rejectedCount,
       attempt_total: result.stats.attemptTotal,

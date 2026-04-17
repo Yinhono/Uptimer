@@ -399,18 +399,9 @@ describe('scheduler/scheduled regression', () => {
     const req = selfFetch.mock.calls[0]?.[0] as Request;
     expect(req.headers.get('Authorization')).toBe('Bearer test-admin-token');
     expect(req.headers.get('Content-Type')).toContain('application/json');
+    expect(req.headers.get('X-Uptimer-Internal-Format')).toBe('compact-v1');
     await expect(req.json()).resolves.toMatchObject({
-      runtime_updates: [
-        {
-          monitor_id: 1,
-          interval_sec: 60,
-          created_at: 1_760_000_000,
-          checked_at: Math.floor(Date.now() / 1000 / 60) * 60,
-          check_status: 'up',
-          next_status: 'up',
-          latency_ms: 21,
-        },
-      ],
+      runtime_updates: [[1, 60, 1_760_000_000, Math.floor(Date.now() / 1000 / 60) * 60, 'up', 'up', 21]],
     });
   });
 
@@ -444,6 +435,7 @@ describe('scheduler/scheduled regression', () => {
     const selfFetch = vi.fn(async (req: Request) => {
       const pathname = new URL(req.url).pathname;
       if (pathname === '/api/v1/internal/scheduled/check-batch') {
+        expect(req.headers.get('X-Uptimer-Internal-Format')).toBe('compact-v1');
         const body = (await req.json()) as {
           ids: number[];
           checked_at: number;
@@ -453,15 +445,15 @@ describe('scheduler/scheduled regression', () => {
         return new Response(
           JSON.stringify({
             ok: true,
-            runtime_updates: body.ids.map((id, batchIndex) => ({
-              monitor_id: id,
-              interval_sec: 60,
-              created_at: 1_760_000_000 + id,
-              checked_at: body.checked_at,
-              check_status: 'up',
-              next_status: 'up',
-              latency_ms: batchIndex === 0 ? -3.7 : 21,
-            })),
+            runtime_updates: body.ids.map((id, batchIndex) => [
+              id,
+              60,
+              1_760_000_000 + id,
+              body.checked_at,
+              'up',
+              'up',
+              batchIndex === 0 ? -3.7 : 21,
+            ]),
             processed_count: body.ids.length,
             rejected_count: 0,
             attempt_total: body.ids.length,

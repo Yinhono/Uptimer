@@ -71,6 +71,16 @@ export type MonitorRuntimeUpdate = {
   latency_ms: number | null;
 };
 
+export type CompactMonitorRuntimeUpdate = [
+  monitor_id: number,
+  interval_sec: number,
+  created_at: number,
+  checked_at: number,
+  check_status: MonitorRuntimeUpdate['check_status'],
+  next_status: MonitorRuntimeUpdate['next_status'],
+  latency_ms: number | null,
+];
+
 type MonitorRuntimeUpdateStatus = Exclude<MonitorRuntimeUpdate['check_status'], null>;
 
 const monitorRuntimeUpdateStatusSchema = z
@@ -114,6 +124,42 @@ function parseMonitorRuntimeUpdateStatus(
 }
 
 export function parseMonitorRuntimeUpdate(value: unknown): MonitorRuntimeUpdate | null {
+  if (Array.isArray(value)) {
+    const [
+      monitor_id,
+      interval_sec,
+      created_at,
+      checked_at,
+      check_status,
+      next_status,
+      latency_ms = null,
+    ] = value;
+    const parsedCheckStatus = parseMonitorRuntimeUpdateStatus(check_status);
+    const parsedNextStatus = parseMonitorRuntimeUpdateStatus(next_status);
+    if (
+      value.length < 6 ||
+      value.length > 7 ||
+      !isPositiveInteger(monitor_id) ||
+      !isPositiveInteger(interval_sec) ||
+      !isNonNegativeInteger(created_at) ||
+      !isNonNegativeInteger(checked_at) ||
+      parsedCheckStatus === undefined ||
+      parsedNextStatus === undefined
+    ) {
+      return null;
+    }
+
+    return {
+      monitor_id,
+      interval_sec,
+      created_at,
+      checked_at,
+      check_status: parsedCheckStatus,
+      next_status: parsedNextStatus,
+      latency_ms: normalizeRuntimeUpdateLatencyMs(latency_ms),
+    };
+  }
+
   if (!isRecord(value)) {
     return null;
   }
@@ -157,6 +203,20 @@ export function parseMonitorRuntimeUpdates(value: unknown): MonitorRuntimeUpdate
   }
 
   return updates;
+}
+
+export function encodeMonitorRuntimeUpdatesCompact(
+  updates: readonly MonitorRuntimeUpdate[],
+): CompactMonitorRuntimeUpdate[] {
+  return updates.map((update) => [
+    update.monitor_id,
+    update.interval_sec,
+    update.created_at,
+    update.checked_at,
+    update.check_status,
+    update.next_status,
+    update.latency_ms,
+  ]);
 }
 
 export const monitorRuntimeUpdateSchema = z.object({
