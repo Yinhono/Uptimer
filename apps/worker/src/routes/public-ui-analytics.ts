@@ -21,6 +21,18 @@ import {
 import { monitorVisibilityPredicate } from '../public/visibility';
 
 const uptimeOverviewRangeSchema = z.enum(['30d', '90d']);
+const ACTIVE_MONITOR_CACHE_TTL_MS = 30_000;
+
+type AnalyticsMonitorRow = {
+  id: number;
+  name: string;
+  type: string;
+  created_at: number;
+};
+type ActiveMonitorCacheEntry = {
+  expiresAtMs: number;
+  rows: AnalyticsMonitorRow[];
+};
 
 function isAuthorizedStatusAdminRequest(c: {
   env: Pick<Env, 'ADMIN_TOKEN'>;
@@ -70,6 +82,13 @@ function normalizeAnalyticsUptimeCacheKeyUrl(url: URL): void {
 }
 
 const statementCacheByDb = new WeakMap<D1Database, Map<string, D1PreparedStatement>>();
+const activeMonitorRowsCacheByDb = new WeakMap<
+  D1Database,
+  {
+    hidden: ActiveMonitorCacheEntry | null;
+    visible: ActiveMonitorCacheEntry | null;
+  }
+>();
 
 function prepareStatement(db: D1Database, sql: string): D1PreparedStatement {
   let statements = statementCacheByDb.get(db);
@@ -86,6 +105,55 @@ function prepareStatement(db: D1Database, sql: string): D1PreparedStatement {
   const statement = db.prepare(sql);
   statements.set(sql, statement);
   return statement;
+}
+
+function getActiveMonitorRowsCache(db: D1Database): {
+  hidden: ActiveMonitorCacheEntry | null;
+  visible: ActiveMonitorCacheEntry | null;
+} {
+  const cached = activeMonitorRowsCacheByDb.get(db);
+  if (cached) {
+    return cached;
+  }
+
+  const next = {
+    hidden: null,
+    visible: null,
+  };
+  activeMonitorRowsCacheByDb.set(db, next);
+  return next;
+}
+
+async function readActiveMonitorRows(
+  db: D1Database,
+  includeHiddenMonitors: boolean,
+): Promise<AnalyticsMonitorRow[]> {
+  const cacheBucket = getActiveMonitorRowsCache(db);
+  const cacheKey = includeHiddenMonitors ? 'hidden' : 'visible';
+  const cached = cacheBucket[cacheKey];
+  const nowMs = Date.now();
+  if (cached && cached.expiresAtMs > nowMs) {
+    return cached.rows;
+  }
+
+  const { results } = await prepareStatement(
+    db,
+    `
+      SELECT m.id, m.name, m.type, m.created_at
+      FROM monitors m
+      WHERE m.is_active = 1
+        AND ${monitorVisibilityPredicate(includeHiddenMonitors, 'm')}
+      ORDER BY m.id
+    `,
+  )
+    .all<AnalyticsMonitorRow>();
+
+  const rows = (results ?? []) as AnalyticsMonitorRow[];
+  cacheBucket[cacheKey] = {
+    expiresAtMs: nowMs + ACTIVE_MONITOR_CACHE_TTL_MS,
+    rows,
+  };
+  return rows;
 }
 
 export async function handlePublicAnalyticsUptime(c: {
@@ -111,29 +179,13 @@ export async function handlePublicAnalyticsUptime(c: {
 
   const monitorRowsPromise = trace.timeAsync(
     'active_monitors',
-    async () =>
-      await prepareStatement(
-        c.env.DB,
-        `
-          SELECT m.id, m.name, m.type, m.created_at
-          FROM monitors m
-          WHERE m.is_active = 1
-            AND ${monitorVisibilityPredicate(includeHiddenMonitors, 'm')}
-          ORDER BY m.id
-        `,
-      )
-        .all<{
-          id: number;
-          name: string;
-          type: string;
-          created_at: number;
-        }>(),
+    async () => await readActiveMonitorRows(c.env.DB, includeHiddenMonitors),
   );
   const historySnapshotPromise = trace.timeAsync(
     'history_snapshot',
     async () => await readPublicAnalyticsOverviewSnapshot(c.env.DB, rangeEndFullDays),
   );
-  const [{ results: monitorRows }, historySnapshot] = await Promise.all([
+  const [monitorRows, historySnapshot] = await Promise.all([
     monitorRowsPromise,
     historySnapshotPromise,
   ]);
