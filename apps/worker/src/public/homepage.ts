@@ -95,6 +95,13 @@ type HomepageMonitorMetadataStamp = {
   monitorCountTotal: number;
   maxUpdatedAt: number | null;
 };
+type HomepageScheduledFastGuardState = {
+  settings: HomepagePublicSettings;
+  monitorMetadataStamp: HomepageMonitorMetadataStamp;
+  hasActiveIncidents: boolean;
+  hasActiveMaintenance: boolean;
+  hasUpcomingMaintenance: boolean;
+};
 
 type HomepageMonitorDataOptions = {
   cardLimit?: number;
@@ -2185,6 +2192,7 @@ export async function tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates
   baseSnapshotBodyJson: string | null | undefined;
   updates: MonitorRuntimeUpdate[];
   trace?: Trace;
+  onGuardState?: (state: HomepageScheduledFastGuardState) => void;
 }): Promise<PublicHomepageResponse | null> {
   const baseSnapshot =
     opts.baseSnapshot ?? parseHomepageSnapshotBodyJson(opts.baseSnapshotBodyJson);
@@ -2198,6 +2206,13 @@ export async function tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates
     'homepage_refresh_fast_guard',
     async () => await readHomepageScheduledFastGuardState(opts.db, opts.now, includeHiddenMonitors),
   );
+  opts.onGuardState?.({
+    settings: guardState.settings,
+    monitorMetadataStamp: guardState.monitorMetadataStamp,
+    hasActiveIncidents: guardState.hasActiveIncidents,
+    hasActiveMaintenance: guardState.hasActiveMaintenance,
+    hasUpcomingMaintenance: guardState.hasUpcomingMaintenance,
+  });
   const settings = guardState.settings;
 
   if (!hasMatchingHomepagePublicSettings(baseSnapshot, settings)) {

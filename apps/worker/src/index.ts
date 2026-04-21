@@ -375,6 +375,29 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
           )
         : import('./snapshots/public-status'),
     ]);
+    let statusFastGuardState:
+      | {
+          settings: {
+            site_title: string;
+            site_description: string;
+            site_locale: 'auto' | 'en' | 'zh-CN' | 'zh-TW' | 'ja' | 'es';
+            site_timezone: string;
+            retention_check_results_days: number;
+            state_failures_to_down_from_up: number;
+            state_successes_to_up_from_down: number;
+            admin_default_overview_range: '24h' | '7d';
+            admin_default_monitor_range: '24h' | '7d' | '30d' | '90d';
+            uptime_rating_level: 1 | 2 | 3 | 4 | 5;
+          };
+          monitorMetadataStamp: {
+            monitorCountTotal: number;
+            maxUpdatedAt: number | null;
+          };
+          hasActiveIncidents: boolean;
+          hasActiveMaintenance: boolean;
+          hasUpcomingMaintenance: boolean;
+        }
+      | undefined;
     let payload =
       skipInitialFreshnessCheck && baseSnapshot.snapshot
         ? trace
@@ -388,6 +411,15 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
                   baseSnapshotBodyJson: null,
                   updates: runtimeUpdates ?? [],
                   trace,
+                  onGuardState: (guardState) => {
+                    statusFastGuardState = {
+                      settings: guardState.settings,
+                      monitorMetadataStamp: guardState.monitorMetadataStamp,
+                      hasActiveIncidents: guardState.hasActiveIncidents,
+                      hasActiveMaintenance: guardState.hasActiveMaintenance,
+                      hasUpcomingMaintenance: guardState.hasUpcomingMaintenance,
+                    };
+                  },
                 }),
             )
           : await homepageMod.tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates({
@@ -396,6 +428,15 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
               baseSnapshot: baseSnapshot.snapshot,
               baseSnapshotBodyJson: null,
               updates: runtimeUpdates ?? [],
+              onGuardState: (guardState) => {
+                statusFastGuardState = {
+                  settings: guardState.settings,
+                  monitorMetadataStamp: guardState.monitorMetadataStamp,
+                  hasActiveIncidents: guardState.hasActiveIncidents,
+                  hasActiveMaintenance: guardState.hasActiveMaintenance,
+                  hasUpcomingMaintenance: guardState.hasUpcomingMaintenance,
+                };
+              },
             })
         : null;
     if (trace?.enabled && payload) {
@@ -443,21 +484,25 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
       );
     }
 
+    const statusRefreshArgs = statusFastGuardState
+      ? {
+          db: env.DB,
+          now,
+          updates: runtimeUpdates ?? [],
+          guardState: statusFastGuardState,
+        }
+      : {
+          db: env.DB,
+          now,
+          updates: runtimeUpdates ?? [],
+        };
     const refreshedStatusPayload = trace
       ? await trace.timeAsync(
           'status_refresh_fast_compute',
           async () =>
-            await statusMod.tryComputePublicStatusPayloadFromScheduledRuntimeUpdates({
-              db: env.DB,
-              now,
-              updates: runtimeUpdates ?? [],
-            }),
+            await statusMod.tryComputePublicStatusPayloadFromScheduledRuntimeUpdates(statusRefreshArgs),
         )
-      : await statusMod.tryComputePublicStatusPayloadFromScheduledRuntimeUpdates({
-          db: env.DB,
-          now,
-          updates: runtimeUpdates ?? [],
-        });
+      : await statusMod.tryComputePublicStatusPayloadFromScheduledRuntimeUpdates(statusRefreshArgs);
     if (refreshedStatusPayload) {
       if (trace) {
         await trace.timeAsync(

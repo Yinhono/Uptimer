@@ -44,6 +44,7 @@ type StatusScheduledFastGuardState = {
   hasActiveMaintenance: boolean;
   hasUpcomingMaintenance: boolean;
 };
+export type PublicStatusScheduledFastGuardState = StatusScheduledFastGuardState;
 type StatusStatementCache = Partial<{
   scheduledFastGuard: D1PreparedStatement;
   scheduledFastGuardIncludingHidden: D1PreparedStatement;
@@ -709,6 +710,7 @@ export async function tryComputePublicStatusPayloadFromScheduledRuntimeUpdates(o
   db: D1Database;
   now: number;
   updates: MonitorRuntimeUpdate[];
+  guardState?: StatusScheduledFastGuardState | null;
 }): Promise<PublicStatusResponse | null> {
   const baseSnapshot = await readStatusSnapshotPayloadAnyAge(
     opts.db,
@@ -720,7 +722,9 @@ export async function tryComputePublicStatusPayloadFromScheduledRuntimeUpdates(o
   }
 
   const includeHiddenMonitors = false;
-  const guardState = await readStatusScheduledFastGuardState(opts.db, opts.now, includeHiddenMonitors);
+  const guardState =
+    opts.guardState ??
+    (await readStatusScheduledFastGuardState(opts.db, opts.now, includeHiddenMonitors));
   if (!hasMatchingStatusPublicSettings(baseSnapshot.data, guardState.settings)) {
     return null;
   }

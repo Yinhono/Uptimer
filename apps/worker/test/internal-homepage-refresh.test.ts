@@ -182,23 +182,25 @@ describe('internal homepage refresh route', () => {
     expect(releaseLease).toHaveBeenCalledWith(env.DB, 'snapshot:homepage:refresh', now + 55);
     expect(
       vi.mocked(tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates),
-    ).toHaveBeenCalledWith({
-      db: env.DB,
-      now,
-      baseSnapshot,
-      baseSnapshotBodyJson: null,
-      updates: [
-        {
-          monitor_id: 1,
-          interval_sec: 60,
-          created_at: now - 300,
-          checked_at: now,
-          check_status: 'up',
-          next_status: 'up',
-          latency_ms: 55,
-        },
-      ],
-    });
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        db: env.DB,
+        now,
+        baseSnapshot,
+        baseSnapshotBodyJson: null,
+        updates: [
+          {
+            monitor_id: 1,
+            interval_sec: 60,
+            created_at: now - 300,
+            checked_at: now,
+            check_status: 'up',
+            next_status: 'up',
+            latency_ms: 55,
+          },
+        ],
+      }),
+    );
   });
 
   it('writes a patched status snapshot when the scheduled fast path can produce one', async () => {
@@ -298,23 +300,25 @@ describe('internal homepage refresh route', () => {
     expect(res.status).toBe(200);
     expect(
       vi.mocked(tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates),
-    ).toHaveBeenCalledWith({
-      db: env.DB,
-      now,
-      baseSnapshot,
-      baseSnapshotBodyJson: null,
-      updates: [
-        {
-          monitor_id: 1,
-          interval_sec: 60,
-          created_at: now - 300,
-          checked_at: now,
-          check_status: 'up',
-          next_status: 'up',
-          latency_ms: 0,
-        },
-      ],
-    });
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        db: env.DB,
+        now,
+        baseSnapshot,
+        baseSnapshotBodyJson: null,
+        updates: [
+          {
+            monitor_id: 1,
+            interval_sec: 60,
+            created_at: now - 300,
+            checked_at: now,
+            check_status: 'up',
+            next_status: 'up',
+            latency_ms: 0,
+          },
+        ],
+      }),
+    );
   });
 
   it('falls back to full compute when the scheduled runtime fast path misses', async () => {
