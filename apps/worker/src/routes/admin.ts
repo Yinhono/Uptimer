@@ -21,6 +21,12 @@ import { requireAdmin } from '../middleware/auth';
 import { AppError } from '../middleware/errors';
 import { requireAdminRateLimit } from '../middleware/rate-limit';
 import { computePublicHomepagePayload } from '../public/homepage';
+import {
+  bumpHomepageIncidentGuardVersion,
+  bumpHomepageMaintenanceGuardVersion,
+  bumpHomepageMonitorGuardVersions,
+  bumpHomepageSettingsGuardVersion,
+} from '../public/homepage-guard-state';
 import { refreshPublicHomepageSnapshotIfNeeded } from '../snapshots';
 import { runHttpCheck } from '../monitor/http';
 import {
@@ -325,6 +331,7 @@ adminRoutes.post('/monitors/groups/reorder', async (c) => {
     .bind(...binds)
     .run();
 
+  await bumpHomepageMonitorGuardVersions(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({
@@ -362,6 +369,7 @@ adminRoutes.post('/monitors/groups/assign', async (c) => {
     await syncGroupSortOrder(c.env.DB, targetGroupName, targetGroupSortOrder, now);
   }
 
+  await bumpHomepageMonitorGuardVersions(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({
@@ -399,6 +407,7 @@ adminRoutes.put('/settings/uptime-rating', async (c) => {
     .bind('uptime_rating_level', String(input.uptime_rating_level))
     .run();
 
+  await bumpHomepageSettingsGuardVersion(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({ uptime_rating_level: input.uptime_rating_level });
@@ -469,6 +478,7 @@ adminRoutes.post('/monitors', async (c) => {
     await syncGroupSortOrder(c.env.DB, groupName, groupSortOrder, now, inserted.id);
   }
 
+  await bumpHomepageMonitorGuardVersions(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({ monitor: monitorRowToApi(inserted, null) }, 201);
@@ -598,6 +608,7 @@ adminRoutes.patch('/monitors/:id', async (c) => {
     await syncGroupSortOrder(c.env.DB, nextGroupName, nextGroupSortOrder, now, updated.id);
   }
 
+  await bumpHomepageMonitorGuardVersions(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({ monitor: monitorRowToApi(updated, null) });
@@ -626,6 +637,7 @@ adminRoutes.delete('/monitors/:id', async (c) => {
     c.env.DB.prepare('DELETE FROM monitors WHERE id = ?1').bind(id),
   ]);
 
+  await bumpHomepageMonitorGuardVersions(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({ deleted: true });
@@ -726,6 +738,7 @@ adminRoutes.post('/monitors/:id/pause', async (c) => {
 
   const state = await db.select().from(monitorState).where(eq(monitorState.monitorId, id)).get();
 
+  await bumpHomepageMonitorGuardVersions(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({ monitor: monitorRowToApi(monitor, state ?? null) });
@@ -768,6 +781,7 @@ adminRoutes.post('/monitors/:id/resume', async (c) => {
 
   const state = await db.select().from(monitorState).where(eq(monitorState.monitorId, id)).get();
 
+  await bumpHomepageMonitorGuardVersions(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({ monitor: monitorRowToApi(monitor, state ?? null) });
@@ -1365,6 +1379,7 @@ adminRoutes.post('/incidents', async (c) => {
     }),
   );
 
+  await bumpHomepageIncidentGuardVersion(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({ incident: incidentRowToApi(row, [], monitorIds) }, 201);
@@ -1466,6 +1481,7 @@ adminRoutes.post('/incidents/:id/updates', async (c) => {
     }),
   );
 
+  await bumpHomepageIncidentGuardVersion(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({
@@ -1572,6 +1588,7 @@ adminRoutes.patch('/incidents/:id/resolve', async (c) => {
     }),
   );
 
+  await bumpHomepageIncidentGuardVersion(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({
@@ -1618,6 +1635,7 @@ adminRoutes.delete('/incidents/:id', async (c) => {
     ).bind(id),
   ]);
 
+  await bumpHomepageIncidentGuardVersion(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({ deleted: true });
@@ -1693,6 +1711,7 @@ adminRoutes.post('/maintenance-windows', async (c) => {
     await c.env.DB.batch(linkStatements);
   }
 
+  await bumpHomepageMaintenanceGuardVersion(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({ maintenance_window: maintenanceWindowRowToApi(row, monitorIds) }, 201);
@@ -1776,6 +1795,7 @@ adminRoutes.patch('/maintenance-windows/:id', async (c) => {
 
   const monitorIdsByWindowId = await listMaintenanceWindowMonitorIdsByWindowId(c.env.DB, [id]);
   const monitorIds = monitorIdsByWindowId.get(id) ?? [];
+  await bumpHomepageMaintenanceGuardVersion(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({ maintenance_window: maintenanceWindowRowToApi(updated, monitorIds) });
@@ -1813,6 +1833,7 @@ adminRoutes.delete('/maintenance-windows/:id', async (c) => {
     ).bind(id),
   ]);
 
+  await bumpHomepageMaintenanceGuardVersion(c.env.DB);
   queuePublicHomepageSnapshotRefresh(c);
 
   return c.json({ deleted: true });

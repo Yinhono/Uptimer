@@ -7,6 +7,11 @@ import {
 import type { PublicStatusResponse } from '../schemas/public-status';
 import type { Trace } from '../observability/trace';
 import {
+  computeHomepageGuardValidUntil,
+  readHomepageGuardCacheState,
+  writeHomepageGuardCacheState,
+} from './homepage-guard-state';
+import {
   fromRuntimeStatusCode,
   materializeMonitorRuntimeTotals,
   normalizeRuntimeUpdateLatencyMs,
@@ -2300,17 +2305,44 @@ export async function tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates
   }
 
   const includeHiddenMonitors = false;
-  const guardState = await withTraceAsync(
-    opts.trace,
-    'homepage_refresh_fast_guard',
-    async () =>
-      await readHomepageScheduledFastGuardState(
-        opts.db,
-        opts.now,
-        includeHiddenMonitors,
-        opts.trace,
-      ),
-  );
+  const guardState = await withTraceAsync(opts.trace, 'homepage_refresh_fast_guard', async () => {
+    const cached = await readHomepageGuardCacheState(opts.db, opts.now, opts.trace);
+    if (opts.trace?.enabled) {
+      opts.trace.setLabel('homepage_guard_state', cached.source);
+      if (cached.validUntil !== undefined) {
+        opts.trace.setLabel('homepage_guard_valid_until_s', cached.validUntil);
+      }
+    }
+    if (cached.source === 'db_cache') {
+      return cached.state;
+    }
+
+    if (opts.trace?.enabled) {
+      opts.trace.setLabel('homepage_guard_state_refresh_reason', cached.source);
+      opts.trace.setLabel('homepage_guard_state', 'refresh');
+    }
+    const refreshed = await readHomepageScheduledFastGuardState(
+      opts.db,
+      opts.now,
+      includeHiddenMonitors,
+      opts.trace,
+    );
+    if (cached.versions) {
+      const validUntil = await computeHomepageGuardValidUntil(opts.db, opts.now);
+      if (opts.trace?.enabled) {
+        opts.trace.setLabel('homepage_guard_valid_until_s', validUntil);
+      }
+      await writeHomepageGuardCacheState({
+        db: opts.db,
+        now: opts.now,
+        versions: cached.versions,
+        validUntil,
+        state: refreshed,
+        trace: opts.trace,
+      });
+    }
+    return refreshed;
+  });
   opts.onGuardState?.({
     settings: guardState.settings,
     monitorMetadataStamp: guardState.monitorMetadataStamp,

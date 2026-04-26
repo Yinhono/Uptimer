@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import type { Env } from '../env';
 import { AppError } from '../middleware/errors';
 import { computePublicHomepagePayload } from '../public/homepage';
+import { bumpHomepageSettingsGuardVersion } from '../public/homepage-guard-state';
 import { refreshPublicHomepageSnapshotIfNeeded } from '../snapshots';
 import { parseSettingsPatch, patchSettings, readSettings } from '../settings';
 
@@ -35,6 +36,7 @@ adminSettingsRoutes.patch('/', async (c) => {
 
   const patch = parseSettingsPatch(rawBody);
   await patchSettings(c.env.DB, patch);
+  await bumpHomepageSettingsGuardVersion(c.env.DB);
 
   queuePublicHomepageSnapshotRefresh(c);
 
