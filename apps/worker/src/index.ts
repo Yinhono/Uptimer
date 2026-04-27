@@ -855,6 +855,15 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
 
     homepageRefreshLease.assertHeld('writing homepage snapshot');
     const activeHomepageRefreshLease = homepageRefreshLease;
+    const shouldCheckHomepageWriteLease = !normalizeFalsyHeader(
+      env.UPTIMER_HOMEPAGE_WRITE_LEASE_CHECK,
+    );
+    const homepageWriteLease = shouldCheckHomepageWriteLease
+      ? {
+          name: HOMEPAGE_REFRESH_LOCK_NAME,
+          expiresAt: activeHomepageRefreshLease.getExpiresAt(),
+        }
+      : undefined;
     const prepareSnapshotWrites = (writeTrace?: Trace) => {
       const preparedHomepageWrite = snapshotMod.prepareHomepageSnapshotWrite(
         env.DB,
@@ -862,10 +871,7 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
         payload,
         writeTrace,
         baseSnapshot.seedDataSnapshot,
-        {
-          name: HOMEPAGE_REFRESH_LOCK_NAME,
-          expiresAt: activeHomepageRefreshLease.getExpiresAt(),
-        },
+        homepageWriteLease,
       );
       const preparedStatusWrite = refreshedStatusPayload
         ? statusSnapshotMod.prepareStatusSnapshotWrite({
@@ -877,10 +883,7 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
               key: snapshotMod.getHomepageSnapshotArtifactKey(),
               generatedAt: preparedHomepageWrite.generatedAt,
               updatedAt: now,
-              lease: {
-                name: HOMEPAGE_REFRESH_LOCK_NAME,
-                expiresAt: activeHomepageRefreshLease.getExpiresAt(),
-              },
+              ...(homepageWriteLease ? { lease: homepageWriteLease } : {}),
             },
           })
         : null;
