@@ -246,6 +246,35 @@ describe('scheduler/scheduled regression', () => {
     expect(waitUntil).not.toHaveBeenCalled();
   });
 
+  it('returns an empty exclusive batch result when no monitor ids remain', async () => {
+    const env = createEnv();
+    const result = await runExclusivePersistedMonitorBatch({
+      db: env.DB,
+      ids: [],
+      checkedAt: Math.floor(Math.floor(Date.now() / 1000) / 60) * 60,
+      stateMachineConfig: {
+        failuresToDownFromUp: 2,
+        successesToUpFromDown: 2,
+      },
+    });
+
+    expect(result).toEqual({
+      runtimeUpdates: [],
+      stats: {
+        processedCount: 0,
+        rejectedCount: 0,
+        attemptTotal: 0,
+        httpCount: 0,
+        tcpCount: 0,
+        assertionCount: 0,
+        downCount: 0,
+        unknownCount: 0,
+      },
+      checksDurMs: 0,
+      persistDurMs: 0,
+    });
+  });
+
   it('lists monitor rows by id with invalid ids filtered out', async () => {
     const env = createEnv({
       dueRows: [

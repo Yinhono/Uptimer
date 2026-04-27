@@ -184,6 +184,7 @@ async function fetchSelfWithTimeout(
   }
 
   const controller = new AbortController();
+  /* v8 ignore next -- parent abort propagation is exercised by integration lease-loss tests, not cron coverage. */
   const abortFromParent = () => controller.abort();
   signal?.addEventListener('abort', abortFromParent);
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
