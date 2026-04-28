@@ -32,6 +32,7 @@ export type ShardedPublicSnapshotContinuationResult = {
   seeded?: boolean;
   assembled?: boolean;
   published?: boolean;
+  artifactPublished?: boolean;
   kind?: ShardedPublicSnapshotKind;
   part?: Exclude<ShardedPublicSnapshotSeedPart, 'all'>;
   monitorCount?: number;
@@ -140,6 +141,9 @@ function logContinuationDiagnostics(
     result.seeded !== undefined ? `seeded=${result.seeded ? 1 : 0}` : null,
     result.assembled !== undefined ? `assembled=${result.assembled ? 1 : 0}` : null,
     result.published !== undefined ? `published=${result.published ? 1 : 0}` : null,
+    result.artifactPublished !== undefined
+      ? `artifact_published=${result.artifactPublished ? 1 : 0}`
+      : null,
     result.monitorCount !== undefined ? `monitors=${result.monitorCount}` : null,
     result.writeCount !== undefined ? `writes=${result.writeCount}` : null,
     result.updateOffset !== undefined ? `update_offset=${result.updateOffset}` : null,
@@ -452,6 +456,9 @@ export async function runShardedPublicSnapshotContinuation(opts: {
     continued: false,
     ...(result.skip ? { skipped: result.skip } : {}),
     ...(result.published !== undefined ? { published: result.published } : {}),
+    ...(result.artifactPublished !== undefined
+      ? { artifactPublished: result.artifactPublished }
+      : {}),
     ...(result.writeCount !== undefined ? { writeCount: result.writeCount } : {}),
     ...(result.error ? { error: true } : {}),
     ...(result.errorName ? { errorName: result.errorName } : {}),

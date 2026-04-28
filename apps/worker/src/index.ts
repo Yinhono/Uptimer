@@ -524,6 +524,9 @@ async function handleInternalShardedPublicSnapshotAssemble(
       ...(result.generatedAt !== undefined ? { generated_at: result.generatedAt } : {}),
       ...(result.bodyBytes !== undefined ? { body_bytes: result.bodyBytes } : {}),
       ...(result.published !== undefined ? { published: result.published } : {}),
+      ...(result.artifactPublished !== undefined
+        ? { artifact_published: result.artifactPublished }
+        : {}),
       ...(result.writeCount !== undefined ? { write_count: result.writeCount } : {}),
       ...(result.skip ? { skip: result.skip } : {}),
       ...(result.error ? { error: true } : {}),
@@ -669,6 +672,9 @@ async function handleInternalShardedPublicSnapshotContinuation(
       ...(result.seeded !== undefined ? { seeded: result.seeded } : {}),
       ...(result.assembled !== undefined ? { assembled: result.assembled } : {}),
       ...(result.published !== undefined ? { published: result.published } : {}),
+      ...(result.artifactPublished !== undefined
+        ? { artifact_published: result.artifactPublished }
+        : {}),
       ...(result.kind ? { kind: result.kind } : {}),
       ...(result.part ? { part: result.part } : {}),
       ...(result.monitorCount !== undefined ? { monitor_count: result.monitorCount } : {}),

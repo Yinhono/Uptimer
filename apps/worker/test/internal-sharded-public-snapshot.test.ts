@@ -324,6 +324,50 @@ describe('internal sharded public snapshot assembler route', () => {
     expect(typeof writes[0]![2]).toBe('string');
   });
 
+  it('publishes the homepage artifact row with preload HTML when publishing homepage JSON', async () => {
+    const writes: unknown[][] = [];
+    const env = {
+      ...createFragmentEnv([
+        {
+          match: 'insert into public_snapshots',
+          run: (args) => {
+            writes.push(args);
+            return { meta: { changes: 1 } };
+          },
+        },
+      ]),
+      UPTIMER_PUBLIC_SHARDED_SNAPSHOT_PUBLISH: '1',
+    } as unknown as Env;
+
+    const res = await worker.fetch(
+      new Request('http://internal/api/v1/internal/assemble/sharded-public-snapshot', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-admin-token',
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({ kind: 'homepage', assembly: 'json', publish: true }),
+      }),
+      env,
+      { waitUntil: vi.fn() } as unknown as ExecutionContext,
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      assembled: true,
+      kind: 'homepage',
+      assembly: 'json',
+      published: true,
+      artifact_published: true,
+      write_count: 2,
+    });
+    expect(writes.map((args) => args[0])).toEqual(['homepage', 'homepage:artifact']);
+    const artifact = JSON.parse(writes[1]![2] as string) as { preload_html?: string; snapshot?: unknown };
+    expect(artifact.preload_html).toContain('uptimer-preload');
+    expect(artifact.snapshot).toMatchObject({ generated_at: 1_700_000_000 });
+  });
+
   it('assembles fragment JSON without parsing every monitor when requested', async () => {
     const res = await worker.fetch(
       new Request('http://internal/api/v1/internal/assemble/sharded-public-snapshot', {
