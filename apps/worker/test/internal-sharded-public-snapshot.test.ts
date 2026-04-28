@@ -239,3 +239,94 @@ describe('internal sharded public snapshot assembler route', () => {
     });
   });
 });
+
+describe('internal sharded public snapshot fragment seed route', () => {
+  it('is hidden unless the seed flag is enabled', async () => {
+    const env = {
+      DB: createFakeD1Database([]),
+      ADMIN_TOKEN: 'test-admin-token',
+    } as unknown as Env;
+
+    const res = await worker.fetch(
+      new Request('http://internal/api/v1/internal/seed/sharded-public-snapshot', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-admin-token',
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({ kind: 'status', part: 'envelope' }),
+      }),
+      env,
+      { waitUntil: vi.fn() } as unknown as ExecutionContext,
+    );
+
+    expect(res.status).toBe(404);
+  });
+
+  it('seeds bounded status fragments from the current static snapshot', async () => {
+    const writes: unknown[][] = [];
+    const generatedAt = Math.floor(Date.now() / 1000);
+    const payload = { ...statusPayload(), generated_at: generatedAt };
+    const env = {
+      DB: createFakeD1Database([
+        {
+          match: (sql) => sql.includes('from public_snapshots') && !sql.includes('body_json'),
+          first: () => ({ generated_at: payload.generated_at, updated_at: payload.generated_at }),
+        },
+        {
+          match: (sql) => sql.includes('from public_snapshots') && sql.includes('body_json'),
+          first: () => ({
+            generated_at: payload.generated_at,
+            updated_at: payload.generated_at,
+            body_json: JSON.stringify(payload),
+          }),
+        },
+        {
+          match: 'insert into public_snapshot_fragments',
+          run: (args) => {
+            writes.push(args);
+            return 1;
+          },
+        },
+      ]),
+      ADMIN_TOKEN: 'test-admin-token',
+      UPTIMER_PUBLIC_SHARDED_FRAGMENT_SEED: '1',
+    } as unknown as Env;
+
+    const res = await worker.fetch(
+      new Request('http://internal/api/v1/internal/seed/sharded-public-snapshot', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-admin-token',
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({
+          kind: 'status',
+          part: 'all',
+          monitor_offset: 0,
+          monitor_limit: 1,
+        }),
+      }),
+      env,
+      { waitUntil: vi.fn() } as unknown as ExecutionContext,
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      seeded: true,
+      kind: 'status',
+      part: 'all',
+      generated_at: payload.generated_at,
+      monitor_count: 1,
+      monitor_offset: 0,
+      monitor_limit: 1,
+      write_count: 2,
+    });
+    expect(writes).toHaveLength(2);
+    expect(writes.map((args) => [args[0], args[1]])).toEqual([
+      [STATUS_ENVELOPE_FRAGMENT_KEY, 'envelope'],
+      [STATUS_MONITOR_FRAGMENTS_KEY, 'monitor:1'],
+    ]);
+  });
+});

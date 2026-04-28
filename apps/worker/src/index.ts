@@ -117,6 +117,13 @@ const internalShardedPublicSnapshotBodySchema = z.object({
   measure_body_bytes: z.boolean().optional().default(false),
 });
 
+const internalShardedPublicSnapshotSeedBodySchema = z.object({
+  kind: z.enum(['homepage', 'status']),
+  part: z.enum(['envelope', 'monitors', 'all']).optional().default('envelope'),
+  monitor_offset: z.number().int().min(0).optional().default(0),
+  monitor_limit: z.number().int().min(1).max(10).optional().default(5),
+});
+
 type InternalScheduledCheckBatchBody = {
   token?: string;
   ids: number[];
@@ -406,6 +413,60 @@ async function handleInternalShardedPublicSnapshotAssemble(
   );
 }
 
+async function handleInternalShardedPublicSnapshotSeed(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  if (!isInternalServiceRequest(request)) {
+    return buildNotFoundJsonResponse(request.headers.get('Origin'));
+  }
+  if (request.method !== 'POST') {
+    return new Response('Method Not Allowed', { status: 405 });
+  }
+  if (!normalizeTruthyHeader(env.UPTIMER_PUBLIC_SHARDED_FRAGMENT_SEED ?? null)) {
+    return buildNotFoundJsonResponse(request.headers.get('Origin'));
+  }
+  if (!hasValidInternalAuth(request, env)) {
+    return new Response('Forbidden', { status: 403 });
+  }
+  if (isRequestBodyTooLarge(request)) {
+    return new Response('Payload Too Large', { status: 413 });
+  }
+
+  const body = await request.json().catch(() => null);
+  const parsed = internalShardedPublicSnapshotSeedBodySchema.safeParse(body);
+  if (!parsed.success) {
+    return new Response('Bad Request', { status: 400 });
+  }
+
+  const { seedShardedPublicSnapshotFragments } = await import(
+    './internal/sharded-public-snapshot-core'
+  );
+  const result = await seedShardedPublicSnapshotFragments({
+    env,
+    kind: parsed.data.kind,
+    part: parsed.data.part,
+    now: Math.floor(Date.now() / 1000),
+    offset: parsed.data.monitor_offset,
+    limit: parsed.data.monitor_limit,
+  });
+  return buildInternalJsonResponse(
+    {
+      ok: result.ok,
+      seeded: result.seeded,
+      kind: result.kind,
+      part: result.part,
+      monitor_count: result.monitorCount,
+      monitor_offset: result.monitorOffset,
+      monitor_limit: result.monitorLimit,
+      write_count: result.writeCount,
+      ...(result.generatedAt !== undefined ? { generated_at: result.generatedAt } : {}),
+      ...(result.skipped ? { skipped: result.skipped } : {}),
+    },
+    result.ok,
+  );
+}
+
 async function handleInternalRuntimeFragmentsRefresh(
   request: Request,
   env: Env,
@@ -641,6 +702,9 @@ export default {
     }
     if (url.pathname === '/api/v1/internal/assemble/sharded-public-snapshot') {
       return handleInternalShardedPublicSnapshotAssemble(request, env);
+    }
+    if (url.pathname === '/api/v1/internal/seed/sharded-public-snapshot') {
+      return handleInternalShardedPublicSnapshotSeed(request, env);
     }
 
     const mod = await import('./fetch-handler');
