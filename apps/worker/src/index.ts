@@ -200,6 +200,10 @@ const internalRefreshJsonBodySchema = z.object({
   runtime_updates: z.array(z.unknown()).optional(),
 });
 
+const internalRuntimeUpdateFragmentsWriteBodySchema = z.object({
+  runtime_updates: z.array(z.unknown()),
+});
+
 const internalShardedPublicSnapshotBodySchema = z.object({
   kind: z.enum(['homepage', 'status']),
   assembly: z.enum(['validated', 'json']).optional().default('validated'),
@@ -230,6 +234,11 @@ const internalShardedPublicSnapshotContinuationBodySchema = z.discriminatedUnion
   z.object({
     step: z.literal('assemble'),
     kind: z.enum(['homepage', 'status']),
+  }),
+  z.object({
+    step: z.literal('artifact'),
+    kind: z.literal('homepage'),
+    generated_at: z.number().int().min(0).optional(),
   }),
 ]);
 
@@ -637,13 +646,21 @@ async function handleInternalShardedPublicSnapshotContinuation(
         }
       : parsed.data.step === 'assemble'
         ? { step: 'assemble', kind: parsed.data.kind }
-        : {
-            step: 'seed',
-            kind: parsed.data.kind,
-            part: parsed.data.part,
-            monitorOffset: parsed.data.monitor_offset,
-            monitorLimit: parsed.data.monitor_limit,
-          },
+        : parsed.data.step === 'artifact'
+          ? {
+              step: 'artifact',
+              kind: 'homepage',
+              ...(parsed.data.generated_at !== undefined
+                ? { generatedAt: parsed.data.generated_at }
+                : {}),
+            }
+          : {
+              step: 'seed',
+              kind: parsed.data.kind,
+              part: parsed.data.part,
+              monitorOffset: parsed.data.monitor_offset,
+              monitorLimit: parsed.data.monitor_limit,
+            },
   });
   const toResponseStep = (step: NonNullable<typeof result.nextStep>) =>
     step.step === 'runtime'
@@ -654,13 +671,19 @@ async function handleInternalShardedPublicSnapshotContinuation(
         }
       : step.step === 'assemble'
         ? { step: 'assemble', kind: step.kind }
-        : {
-            step: 'seed',
-            kind: step.kind,
-            part: step.part,
-            monitor_offset: step.monitorOffset ?? 0,
-            monitor_limit: step.monitorLimit ?? 5,
-          };
+        : step.step === 'artifact'
+          ? {
+              step: 'artifact',
+              kind: step.kind,
+              ...(step.generatedAt !== undefined ? { generated_at: step.generatedAt } : {}),
+            }
+          : {
+              step: 'seed',
+              kind: step.kind,
+              part: step.part,
+              monitor_offset: step.monitorOffset ?? 0,
+              monitor_limit: step.monitorLimit ?? 5,
+            };
   const nextStep = result.nextStep ? toResponseStep(result.nextStep) : undefined;
   const nextSteps = result.nextSteps?.map(toResponseStep);
   return buildInternalJsonResponse(
@@ -677,6 +700,7 @@ async function handleInternalShardedPublicSnapshotContinuation(
         : {}),
       ...(result.kind ? { kind: result.kind } : {}),
       ...(result.part ? { part: result.part } : {}),
+      ...(result.generatedAt !== undefined ? { generated_at: result.generatedAt } : {}),
       ...(result.monitorCount !== undefined ? { monitor_count: result.monitorCount } : {}),
       ...(result.monitorOffset !== undefined ? { monitor_offset: result.monitorOffset } : {}),
       ...(result.monitorLimit !== undefined ? { monitor_limit: result.monitorLimit } : {}),
@@ -699,6 +723,58 @@ async function handleInternalShardedPublicSnapshotContinuation(
       ...(nextSteps && nextSteps.length > 0 ? { next_steps: nextSteps } : {}),
     },
     result.ok,
+  );
+}
+
+async function handleInternalRuntimeUpdateFragmentsWrite(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  if (!isInternalServiceRequest(request)) {
+    return buildNotFoundJsonResponse(request.headers.get('Origin'));
+  }
+  if (request.method !== 'POST') {
+    return new Response('Method Not Allowed', { status: 405 });
+  }
+  if (!normalizeTruthyHeader(env.UPTIMER_PUBLIC_MONITOR_UPDATE_FRAGMENT_WRITES ?? null)) {
+    return buildNotFoundJsonResponse(request.headers.get('Origin'));
+  }
+  if (!hasValidInternalAuth(request, env)) {
+    return new Response('Forbidden', { status: 403 });
+  }
+  if (isRequestBodyTooLarge(request)) {
+    return new Response('Payload Too Large', { status: 413 });
+  }
+
+  const body = await request.json().catch(() => null);
+  const parsed = internalRuntimeUpdateFragmentsWriteBodySchema.safeParse(body);
+  if (!parsed.success) {
+    return new Response('Bad Request', { status: 400 });
+  }
+  const updates = parseMonitorRuntimeUpdates(parsed.data.runtime_updates);
+  if (!updates) {
+    return new Response('Bad Request', { status: 400 });
+  }
+
+  const [{ buildMonitorRuntimeUpdateFragmentWrites }, { writePublicSnapshotFragments }] =
+    await Promise.all([
+      import('./snapshots/public-monitor-fragments'),
+      import('./snapshots/public-fragments'),
+    ]);
+  const now = Math.floor(Date.now() / 1000);
+  const fragmentWrites = buildMonitorRuntimeUpdateFragmentWrites(updates, now);
+  if (fragmentWrites.length > 0) {
+    await writePublicSnapshotFragments(env.DB, fragmentWrites);
+  }
+
+  return buildInternalJsonResponse(
+    {
+      ok: true,
+      written: fragmentWrites.length > 0,
+      update_count: updates.length,
+      write_count: fragmentWrites.length,
+    },
+    true,
   );
 }
 
@@ -805,6 +881,9 @@ async function handleInternalScheduledCheckBatch(
 
   const ids = [...new Set(parsedBody.ids)];
   const suppressedMonitorIds = new Set(parsedBody.suppressed_monitor_ids ?? []);
+  const trustSchedulerLease = normalizeTruthyHeader(
+    env.UPTIMER_INTERNAL_CHECK_BATCH_TRUST_SCHEDULER_LEASE ?? null,
+  );
   const [{ runExclusivePersistedMonitorBatch }, notificationsModule] = await timeInternalCheckBatchDiagnostic(
     diagnosticsEnabled,
     diagnosticsTimings,
@@ -852,6 +931,7 @@ async function handleInternalScheduledCheckBatch(
         checkedAt: parsedBody.checked_at,
         abortSignal: request.signal,
         suppressedMonitorIds,
+        trustSchedulerLease,
         stateMachineConfig: {
           failuresToDownFromUp: parsedBody.state_failures_to_down_from_up,
           successesToUpFromDown: parsedBody.state_successes_to_up_from_down,
@@ -1004,6 +1084,9 @@ export default {
     }
     if (url.pathname === '/api/v1/internal/refresh/runtime-fragments') {
       return handleInternalRuntimeFragmentsRefresh(request, env);
+    }
+    if (url.pathname === '/api/v1/internal/write/runtime-update-fragments') {
+      return handleInternalRuntimeUpdateFragmentsWrite(request, env);
     }
     if (url.pathname === '/api/v1/internal/assemble/sharded-public-snapshot') {
       return handleInternalShardedPublicSnapshotAssemble(request, env);
