@@ -13,6 +13,7 @@ import {
 
 const SNAPSHOT_KEY = 'homepage';
 const SNAPSHOT_ARTIFACT_KEY = 'homepage:artifact';
+export const HOMEPAGE_ARTIFACT_MONITOR_FRAGMENTS_KEY = 'homepage:artifact:monitors';
 const MAX_AGE_SECONDS = 60;
 const MAX_STALE_SECONDS = 10 * 60;
 const REFRESH_LOCK_NAME = 'snapshot:homepage:refresh';
@@ -281,6 +282,71 @@ function renderMaintenanceCard(
   return parts.join('');
 }
 
+function renderHomepageMonitorPreloadCard(
+  monitor: PublicHomepageResponse['monitors'][number],
+  formatTimestamp: (tsSec: number) => string,
+): string {
+  const uptimePct =
+    typeof monitor.uptime_30d?.uptime_pct === 'number'
+      ? `${monitor.uptime_30d.uptime_pct.toFixed(3)}%`
+      : '-';
+  const status = monitor.status;
+  const statusLabel = escapeHtml(status);
+  const lastCheckedLabel = monitor.last_checked_at
+    ? `Last checked: ${formatTimestamp(monitor.last_checked_at)}`
+    : 'Never checked';
+
+  return `<article class="card"><div class="row"><div class="lhs"><span class="dot dot-${status}"></span><div class="ut"><div class="mn">${escapeHtml(monitor.name)}</div><div class="mt">${escapeHtml(monitor.type)}</div></div></div><div class="rhs"><span class="up">${escapeHtml(uptimePct)}</span><span class="sb sb-${status}">${statusLabel}</span></div></div><div><div class="lbl">Availability (30d)</div><div class="strip">${buildUptimeStripSvg(monitor.uptime_day_strip)}</div></div><div><div class="lbl">Recent checks</div><div class="strip">${buildHeartbeatStripSvg(monitor.heartbeat_strip)}</div></div><div class="ft">${lastCheckedLabel}</div></article>`;
+}
+
+export function renderHomepageMonitorPreloadCardFragment(
+  monitor: PublicHomepageResponse['monitors'][number],
+): string {
+  const timeCache = new Map<number, string>();
+  const formatTimestamp = (tsSec: number) => escapeHtml(formatTime(tsSec, timeCache));
+  return renderHomepageMonitorPreloadCard(monitor, formatTimestamp);
+}
+
+export function buildHomepageArtifactMonitorFragmentWrites(
+  payload: PublicHomepageResponse,
+  updatedAt: number,
+  monitorIds?: Iterable<number>,
+): Array<{
+  snapshotKey: string;
+  fragmentKey: string;
+  generatedAt: number;
+  bodyJson: string;
+  updatedAt: number;
+}> {
+  const selectedMonitorIds = monitorIds ? new Set(monitorIds) : null;
+  const writes: Array<{
+    snapshotKey: string;
+    fragmentKey: string;
+    generatedAt: number;
+    bodyJson: string;
+    updatedAt: number;
+  }> = [];
+
+  for (const monitor of payload.monitors) {
+    if (selectedMonitorIds && !selectedMonitorIds.has(monitor.id)) {
+      continue;
+    }
+    writes.push({
+      snapshotKey: HOMEPAGE_ARTIFACT_MONITOR_FRAGMENTS_KEY,
+      fragmentKey: `monitor:${monitor.id}`,
+      generatedAt: payload.generated_at,
+      bodyJson: JSON.stringify({
+        id: monitor.id,
+        group_name: monitor.group_name,
+        card_html: renderHomepageMonitorPreloadCardFragment(monitor),
+      }),
+      updatedAt,
+    });
+  }
+
+  return writes;
+}
+
 function renderPreload(
   snapshot: PublicHomepageResponse,
   monitorNameById?: ReadonlyMap<number, string>,
@@ -311,19 +377,7 @@ function renderPreload(
   for (const [groupName, groupMonitors] of groups.entries()) {
     const monitorCardsParts: string[] = [];
     for (const monitor of groupMonitors) {
-      const uptimePct =
-        typeof monitor.uptime_30d?.uptime_pct === 'number'
-          ? `${monitor.uptime_30d.uptime_pct.toFixed(3)}%`
-          : '-';
-      const status = monitor.status;
-      const statusLabel = escapeHtml(status);
-      const lastCheckedLabel = monitor.last_checked_at
-        ? `Last checked: ${formatTimestamp(monitor.last_checked_at)}`
-        : 'Never checked';
-
-      monitorCardsParts.push(
-        `<article class="card"><div class="row"><div class="lhs"><span class="dot dot-${status}"></span><div class="ut"><div class="mn">${escapeHtml(monitor.name)}</div><div class="mt">${escapeHtml(monitor.type)}</div></div></div><div class="rhs"><span class="up">${escapeHtml(uptimePct)}</span><span class="sb sb-${status}">${statusLabel}</span></div></div><div><div class="lbl">Availability (30d)</div><div class="strip">${buildUptimeStripSvg(monitor.uptime_day_strip)}</div></div><div><div class="lbl">Recent checks</div><div class="strip">${buildHeartbeatStripSvg(monitor.heartbeat_strip)}</div></div><div class="ft">${lastCheckedLabel}</div></article>`,
-      );
+      monitorCardsParts.push(renderHomepageMonitorPreloadCard(monitor, formatTimestamp));
     }
 
     groupedMonitorsParts.push(

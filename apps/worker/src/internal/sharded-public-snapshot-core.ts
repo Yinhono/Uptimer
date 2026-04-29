@@ -111,6 +111,24 @@ function bodyJsonBytes(bodyJson: string, enabled: boolean): number | undefined {
   return enabled ? bodyJson.length : undefined;
 }
 
+function isTruthyEnvFlag(value: unknown): boolean {
+  if (typeof value !== 'string') {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized === '1' ||
+    normalized === 'true' ||
+    normalized === 'yes' ||
+    normalized === 'on'
+  );
+}
+
+function shouldWriteHomepageArtifactFragments(env: Env): boolean {
+  const raw = (env as unknown as Record<string, unknown>).UPTIMER_PUBLIC_HOMEPAGE_ARTIFACT_FRAGMENT_WRITES;
+  return isTruthyEnvFlag(raw);
+}
+
 const RAW_PUBLIC_SNAPSHOT_FUTURE_TOLERANCE_SECONDS = 60;
 const READ_RAW_PUBLIC_SNAPSHOT_SQL = `
   SELECT generated_at, body_json
@@ -472,6 +490,20 @@ export async function seedShardedPublicSnapshotFragments(
       monitorIds,
       now: opts.now,
     });
+    if (
+      opts.kind === 'homepage' &&
+      (opts.part === 'monitors' || opts.part === 'all') &&
+      shouldWriteHomepageArtifactFragments(opts.env)
+    ) {
+      const { buildHomepageArtifactMonitorFragmentWrites } = await import('../snapshots/public-homepage');
+      writes.push(
+        ...buildHomepageArtifactMonitorFragmentWrites(
+          payload as PublicHomepageResponse,
+          opts.now,
+          monitorIds,
+        ),
+      );
+    }
     if (writes.length === 0) {
       return {
         ok: true,

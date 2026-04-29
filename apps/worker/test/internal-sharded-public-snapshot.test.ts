@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { Env } from '../src/env';
 import worker from '../src/index';
+import { HOMEPAGE_ARTIFACT_MONITOR_FRAGMENTS_KEY } from '../src/snapshots/public-homepage';
 import {
   buildHomepageEnvelopeFragmentWrite,
   buildHomepageMonitorFragmentWrites,
@@ -904,6 +905,71 @@ describe('internal sharded public snapshot fragment seed route', () => {
     );
 
     expect(res.status).toBe(404);
+  });
+
+  it('seeds homepage artifact monitor fragments behind the artifact flag', async () => {
+    const writes: unknown[][] = [];
+    const generatedAt = Math.floor(Date.now() / 1000);
+    const payload = { ...homepagePayload(), generated_at: generatedAt };
+    const env = {
+      DB: createFakeD1Database([
+        {
+          match: (sql) => sql.includes('from public_snapshots') && sql.includes('body_json'),
+          first: () => ({
+            generated_at: payload.generated_at,
+            updated_at: payload.generated_at,
+            body_json: JSON.stringify(payload),
+          }),
+        },
+        {
+          match: 'insert into public_snapshot_fragments',
+          run: (args) => {
+            writes.push(args);
+            return 1;
+          },
+        },
+      ]),
+      ADMIN_TOKEN: 'test-admin-token',
+      UPTIMER_PUBLIC_SHARDED_FRAGMENT_SEED: '1',
+      UPTIMER_PUBLIC_HOMEPAGE_ARTIFACT_FRAGMENT_WRITES: '1',
+    } as unknown as Env;
+
+    const res = await worker.fetch(
+      new Request('http://internal/api/v1/internal/seed/sharded-public-snapshot', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-admin-token',
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({
+          kind: 'homepage',
+          part: 'monitors',
+          monitor_offset: 0,
+          monitor_limit: 1,
+        }),
+      }),
+      env,
+      { waitUntil: vi.fn() } as unknown as ExecutionContext,
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      seeded: true,
+      kind: 'homepage',
+      part: 'monitors',
+      generated_at: payload.generated_at,
+      monitor_count: 1,
+      monitor_offset: 0,
+      monitor_limit: 1,
+      write_count: 2,
+    });
+    expect(writes.map((args) => [args[0], args[1]])).toEqual([
+      [HOMEPAGE_MONITOR_FRAGMENTS_KEY, 'monitor:1'],
+      [HOMEPAGE_ARTIFACT_MONITOR_FRAGMENTS_KEY, 'monitor:1'],
+    ]);
+    const artifactBody = JSON.parse(writes[1]![3] as string) as { card_html?: string };
+    expect(artifactBody.card_html).toContain('Availability (30d)');
   });
 
   it('seeds bounded status fragments from the current static snapshot', async () => {

@@ -9,7 +9,9 @@ vi.mock('../src/scheduler/lock', () => ({
 import { acquireLease, releaseLease, renewLease } from '../src/scheduler/lock';
 import {
   applyHomepageCacheHeaders,
+  buildHomepageArtifactMonitorFragmentWrites,
   buildHomepageRenderArtifact,
+  HOMEPAGE_ARTIFACT_MONITOR_FRAGMENTS_KEY,
   getHomepageSnapshotKey,
   getHomepageSnapshotMaxAgeSeconds,
   getHomepageSnapshotMaxStaleSeconds,
@@ -123,6 +125,36 @@ describe('snapshots/public-homepage', () => {
     if ('snapshot' in artifact) {
       expect(artifact.snapshot).toEqual(payload);
     }
+  });
+
+  it('builds pre-rendered homepage artifact monitor fragments', () => {
+    const payload = samplePayload(190);
+    payload.monitors[0] = {
+      ...payload.monitors[0],
+      name: '<API & edge>',
+      group_name: 'Core',
+    };
+
+    const writes = buildHomepageArtifactMonitorFragmentWrites(payload, 200, [1]);
+
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      snapshotKey: HOMEPAGE_ARTIFACT_MONITOR_FRAGMENTS_KEY,
+      fragmentKey: 'monitor:1',
+      generatedAt: 190,
+      updatedAt: 200,
+    });
+    const body = JSON.parse(writes[0].bodyJson) as {
+      id: number;
+      group_name: string | null;
+      card_html: string;
+    };
+    expect(body.id).toBe(1);
+    expect(body.group_name).toBe('Core');
+    expect(body.card_html).toContain('&lt;API &amp; edge&gt;');
+    expect(body.card_html).toContain('Availability (30d)');
+    expect(body.card_html).toContain('<path d="M');
+    expect(body.card_html).not.toContain('<rect ');
   });
 
   it('reads fresh and bounded-stale homepage snapshots without live compute', async () => {
