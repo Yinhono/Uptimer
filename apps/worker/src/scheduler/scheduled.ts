@@ -775,16 +775,7 @@ async function runScheduledCheckBatchViaService(
     }
   }
 
-  const result = toScheduledCheckBatchServiceResult(parsedBody);
-  if (returnRuntimeUpdatesForSplit) {
-    await writeRuntimeUpdateFragmentsViaService(env, result.runtimeUpdates, signal);
-    return {
-      ...result,
-      runtimeUpdates: [],
-    };
-  }
-
-  return result;
+  return toScheduledCheckBatchServiceResult(parsedBody);
 }
 
 type CachedMonitorHttpJson = {
@@ -1948,6 +1939,19 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
         checksDurMs += batch.checksDurMs;
         persistDurMs += batch.persistDurMs;
         mergeBatchStats(aggregateStats, batch.stats);
+      }
+
+      if (splitRuntimeFragmentWrites && runtimeUpdates.length > 0) {
+        const runtimeFragmentWriteStart = performance.now();
+        try {
+          await writeRuntimeUpdateFragmentsViaService(env, runtimeUpdates, schedulerLease.signal);
+          runtimeUpdates = [];
+          runtimeSnapshotDurMs = performance.now() - runtimeFragmentWriteStart;
+        } catch (err) {
+          console.warn('runtime update fragments write: service write failed', err);
+          requiresRuntimeSnapshotRebuild = true;
+          requiresFullHomepageRefresh = true;
+        }
       }
     } else {
       const batch = await runPersistedMonitorBatch({

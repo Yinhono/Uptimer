@@ -686,10 +686,9 @@ describe('scheduler/scheduled regression', () => {
 
     const requests = selfFetch.mock.calls.map((call) => call[0] as Request);
     expect(requests.filter((request) => new URL(request.url).pathname === '/api/v1/internal/scheduled/check-batch')).toHaveLength(2);
-    expect(requests.filter((request) => new URL(request.url).pathname === '/api/v1/internal/write/runtime-update-fragments')).toHaveLength(2);
+    expect(requests.filter((request) => new URL(request.url).pathname === '/api/v1/internal/write/runtime-update-fragments')).toHaveLength(1);
     expect(writerBodies).toEqual([
-      { runtime_updates: [[1, 60, 1_760_000_001, checkedAt, 'up', 'up', 21], [2, 60, 1_760_000_002, checkedAt, 'up', 'up', 21], [3, 60, 1_760_000_003, checkedAt, 'up', 'up', 21], [4, 60, 1_760_000_004, checkedAt, 'up', 'up', 21], [5, 60, 1_760_000_005, checkedAt, 'up', 'up', 21], [6, 60, 1_760_000_006, checkedAt, 'up', 'up', 21]] },
-      { runtime_updates: [[7, 60, 1_760_000_007, checkedAt, 'up', 'up', 21]] },
+      { runtime_updates: [[1, 60, 1_760_000_001, checkedAt, 'up', 'up', 21], [2, 60, 1_760_000_002, checkedAt, 'up', 'up', 21], [3, 60, 1_760_000_003, checkedAt, 'up', 'up', 21], [4, 60, 1_760_000_004, checkedAt, 'up', 'up', 21], [5, 60, 1_760_000_005, checkedAt, 'up', 'up', 21], [6, 60, 1_760_000_006, checkedAt, 'up', 'up', 21], [7, 60, 1_760_000_007, checkedAt, 'up', 'up', 21]] },
     ]);
     expect(refreshPublicMonitorRuntimeSnapshot).not.toHaveBeenCalled();
   });
