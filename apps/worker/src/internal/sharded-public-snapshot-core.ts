@@ -493,13 +493,14 @@ async function readHomepageSeedPayload(
   }
 
   try {
-    const { tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates } = await import(
-      '../public/homepage'
-    );
+    const [{ tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates }, { readPublicMonitorRuntimeSnapshot }] =
+      await Promise.all([import('../public/homepage'), import('../public/monitor-runtime')]);
+    const runtimeSnapshot = await readPublicMonitorRuntimeSnapshot(env.DB, now);
+    const seedNow = runtimeSnapshot?.generated_at ?? now;
     return (
       await tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates({
         db: env.DB,
-        now,
+        now: seedNow,
         baseSnapshot: base.snapshot,
         baseSnapshotBodyJson: null,
         updates: [],
